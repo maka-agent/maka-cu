@@ -23,6 +23,14 @@ final class HostDispatchTests: XCTestCase {
         XCTAssertFalse(hostUnknownActionMayChangeWindowTopology(.scroll(direction: .down, pages: 1)))
     }
 
+    func testOnlyRendererTextRolesUseTheWebContentReplacementPath() {
+        XCTAssertTrue(hostIsWebContentTextRole("AXTextField"))
+        XCTAssertTrue(hostIsWebContentTextRole("AXTextArea"))
+        XCTAssertFalse(hostIsWebContentTextRole("AXButton"))
+        XCTAssertFalse(hostIsWebContentTextRole("AXSlider"))
+        XCTAssertFalse(hostIsWebContentTextRole("AXWebArea"))
+    }
+
     func testForegroundRestoreOnlyTargetsThePreviousAppAfterTargetActivation() {
         XCTAssertEqual(
             hostForegroundPidToRestore(previousPid: 41, currentPid: 52, targetPid: 52),
@@ -335,6 +343,213 @@ final class HostDispatchTests: XCTestCase {
         harness.send(dispatchElement(snapshot: snapshot))
         XCTAssertEqual(try errorCode(harness.awaitResult()), "element_changed")
         XCTAssertTrue(harness.environment.pointEvents.posted.isEmpty)
+    }
+
+    func testWebContentSetValueUsesExactFocusedRendererTextReplacement() throws {
+        let webContentPid = hostTestPid + 1
+        let webContentStartTime = hostTestProcessStartTime + 10
+        let element = hostTestElement(pid: webContentPid)
+        var probe = FakeBindingProbe()
+        probe.startTimes = [
+            hostTestPid: hostTestProcessStartTime,
+            webContentPid: webContentStartTime,
+        ]
+
+        var environment = FakeEnvironment()
+        environment.probe = probe
+        environment.windows = [hostTestWindow()]
+        environment.textElement.beforeValue = "old"
+        environment.textElement.afterValue = "new"
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            elementRole: "AXTextField",
+            elementLabel: "Web field",
+            element: element,
+            elementActions: [],
+            dispatchPid: webContentPid,
+            dispatchProcessStartTime: webContentStartTime
+        )
+        harness.install(snapshot)
+
+        harness.send(
+            dispatchElement(
+                snapshot: snapshot,
+                action: #"{"kind":"set_value","value":"new"}"#
+            )
+        )
+        let result = try harness.awaitResult()
+        XCTAssertEqual(result["outcome"] as? String, "ok")
+        XCTAssertEqual(result["path"] as? String, "cg_event_pid")
+        XCTAssertEqual(result["effect"] as? String, "confirmed")
+        XCTAssertEqual(harness.environment.focusRequests.requested.count, 1)
+        XCTAssertEqual(harness.environment.textElement.selectAllCount, 1)
+        XCTAssertEqual(harness.environment.keyEvents.posted, [.type("new")])
+        XCTAssertEqual(harness.environment.keyEvents.postedPids, [webContentPid])
+    }
+
+    func testWebContentSetValueClearsAndFailsClosedWithoutReadback() throws {
+        let webContentPid = hostTestPid + 1
+        let webContentStartTime = hostTestProcessStartTime + 10
+        let element = hostTestElement(pid: webContentPid)
+
+        func makeSnapshot(_ harness: ServerHarness) -> HostSnapshot {
+            hostTestSnapshot(
+                registry: harness.server.currentRegistry(),
+                session: "s1",
+                elementRole: "AXTextField",
+                elementLabel: "Web field",
+                element: element,
+                elementActions: [],
+                dispatchPid: webContentPid,
+                dispatchProcessStartTime: webContentStartTime
+            )
+        }
+
+        var clearProbe = FakeBindingProbe()
+        clearProbe.startTimes = [
+            hostTestPid: hostTestProcessStartTime,
+            webContentPid: webContentStartTime,
+        ]
+        var clearEnvironment = FakeEnvironment()
+        clearEnvironment.probe = clearProbe
+        clearEnvironment.windows = [hostTestWindow()]
+        clearEnvironment.textElement.beforeValue = "old"
+        clearEnvironment.textElement.afterValue = ""
+        let clearHarness = ServerHarness(environment: clearEnvironment)
+        try clearHarness.begin()
+        let clearSnapshot = makeSnapshot(clearHarness)
+        clearHarness.install(clearSnapshot)
+        clearHarness.send(
+            dispatchElement(
+                snapshot: clearSnapshot,
+                action: #"{"kind":"set_value","value":""}"#
+            )
+        )
+        let clearResult = try clearHarness.awaitResult()
+        XCTAssertEqual(clearResult["path"] as? String, "cg_event_pid")
+        XCTAssertEqual(clearResult["effect"] as? String, "confirmed")
+        XCTAssertEqual(
+            clearHarness.environment.keyEvents.posted,
+            [.key(name: "Backspace", modifiers: [])]
+        )
+
+        var missingProbe = FakeBindingProbe()
+        missingProbe.startTimes = clearProbe.startTimes
+        var missingEnvironment = FakeEnvironment()
+        missingEnvironment.probe = missingProbe
+        missingEnvironment.windows = [hostTestWindow()]
+        missingEnvironment.textElement.beforeValue = nil
+        let missingHarness = ServerHarness(environment: missingEnvironment)
+        try missingHarness.begin()
+        let missingSnapshot = makeSnapshot(missingHarness)
+        missingHarness.install(missingSnapshot)
+        missingHarness.send(
+            dispatchElement(
+                snapshot: missingSnapshot,
+                action: #"{"kind":"set_value","value":"new"}"#
+            )
+        )
+        XCTAssertEqual(
+            try errorCode(missingHarness.awaitResult()),
+            "element_not_actionable"
+        )
+        XCTAssertTrue(missingHarness.environment.focusRequests.requested.isEmpty)
+        XCTAssertTrue(missingHarness.environment.keyEvents.posted.isEmpty)
+    }
+
+    func testWebContentSetValueNoopDoesNotPrepareFocusOrPostKeys() throws {
+        let webContentPid = hostTestPid + 1
+        let webContentStartTime = hostTestProcessStartTime + 10
+        var probe = FakeBindingProbe()
+        probe.startTimes = [
+            hostTestPid: hostTestProcessStartTime,
+            webContentPid: webContentStartTime,
+        ]
+        var environment = FakeEnvironment()
+        environment.probe = probe
+        environment.windows = [hostTestWindow()]
+        environment.textElement.beforeValue = "same"
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            elementRole: "AXTextField",
+            elementLabel: "Web field",
+            element: hostTestElement(pid: webContentPid),
+            elementActions: [],
+            dispatchPid: webContentPid,
+            dispatchProcessStartTime: webContentStartTime
+        )
+        harness.install(snapshot)
+        harness.send(
+            dispatchElement(
+                snapshot: snapshot,
+                action: #"{"kind":"set_value","value":"same"}"#
+            )
+        )
+
+        let result = try harness.awaitResult()
+        XCTAssertEqual(result["outcome"] as? String, "ok")
+        XCTAssertEqual(result["path"] as? String, "ax_attribute")
+        XCTAssertEqual(result["effect"] as? String, "confirmed")
+        XCTAssertTrue(harness.environment.focusRequests.requested.isEmpty)
+        XCTAssertTrue(harness.environment.keyEvents.posted.isEmpty)
+    }
+
+    func testWebContentSetValueSpendsTheFrameAfterAcceptedFocusCannotComplete() throws {
+        let webContentPid = hostTestPid + 1
+        let webContentStartTime = hostTestProcessStartTime + 10
+        let element = hostTestElement(pid: webContentPid)
+        var probe = FakeBindingProbe()
+        probe.startTimes = [
+            hostTestPid: hostTestProcessStartTime,
+            webContentPid: webContentStartTime,
+        ]
+
+        var environment = FakeEnvironment()
+        environment.probe = probe
+        environment.windows = [hostTestWindow()]
+        environment.textElement.beforeValue = "old"
+        environment.focusRequests.focusFollows = false
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            elementRole: "AXTextField",
+            elementLabel: "Web field",
+            element: element,
+            elementActions: [],
+            dispatchPid: webContentPid,
+            dispatchProcessStartTime: webContentStartTime
+        )
+        harness.install(snapshot)
+
+        let request = dispatchElement(
+            snapshot: snapshot,
+            action: #"{"kind":"set_value","value":"new"}"#
+        )
+        harness.send(request)
+        let result = try harness.awaitResult()
+        XCTAssertEqual(result["outcome"] as? String, "unknown")
+        XCTAssertEqual(result["path"] as? String, "ax_attribute")
+        XCTAssertEqual(try errorCode(result), "outcome_unknown")
+        XCTAssertTrue(harness.environment.keyEvents.posted.isEmpty)
+
+        harness.send(
+            dispatchElement(
+                snapshot: snapshot,
+                action: #"{"kind":"set_value","value":"new"}"#
+            )
+        )
+        XCTAssertEqual(try errorCode(harness.awaitResult()), "snapshot_spent")
     }
 
     func testAnAmbiguousRefetchFailsClosed() throws {

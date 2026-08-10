@@ -92,6 +92,10 @@ func hostForegroundPidToRestore(
     return previousPid
 }
 
+public func hostIsWebContentTextRole(_ role: String) -> Bool {
+    role == "AXTextField" || role == "AXTextArea"
+}
+
 public enum HostPointAction: Equatable, Sendable {
     case move
     case leftClick(count: Int)

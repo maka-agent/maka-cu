@@ -82,6 +82,9 @@ public protocol HostSystemEnvironment {
     /// an application may return success and leave focus where it was, so the
     /// caller re-reads `focusedElement(pid:)` before posting anything.
     func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool
+    func elementIsFocused(_ element: AXUIElement) -> Bool
+    func elementStringValue(_ element: AXUIElement) -> String?
+    func selectAllText(_ element: AXUIElement) -> Bool
     func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe
     /// §6.3 — the path has already been selected and permitted by
     /// `hostPointDispatchPath`; this only posts it.
@@ -212,6 +215,29 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
 
     public func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool {
         AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+    }
+
+    public func elementIsFocused(_ element: AXUIElement) -> Bool {
+        HostAX.bool(element, kAXFocusedAttribute) == true
+    }
+
+    public func elementStringValue(_ element: AXUIElement) -> String? {
+        HostAX.stringLikeValue(element, kAXValueAttribute)
+    }
+
+    public func selectAllText(_ element: AXUIElement) -> Bool {
+        guard let value = HostAX.stringLikeValue(element, kAXValueAttribute) else {
+            return false
+        }
+        var range = CFRange(location: 0, length: value.utf16.count)
+        guard let boxed = AXValueCreate(.cfRange, &range) else {
+            return false
+        }
+        return AXUIElementSetAttributeValue(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            boxed
+        ) == .success
     }
 
     public func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe {

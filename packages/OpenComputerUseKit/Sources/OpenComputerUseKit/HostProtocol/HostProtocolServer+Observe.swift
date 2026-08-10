@@ -850,6 +850,16 @@ extension HostProtocolServer {
             }
 
         case .setValue(let value):
+            if binding.dispatchPid != binding.pid,
+               hostIsWebContentTextRole(binding.observed.role) {
+                return performWebContentTextReplacement(
+                    value,
+                    on: element,
+                    binding: binding,
+                    window: window
+                )
+            }
+
             guard HostAX.isSettable(element, kAXValueAttribute) else {
                 return refused(.elementNotActionable)
             }
@@ -942,6 +952,103 @@ extension HostProtocolServer {
         case .moveWindow, .resizeWindow, .minimizeWindow:
             return performWindowAction(action, on: element, binding: binding, window: window)
         }
+    }
+
+    private func performWebContentTextReplacement(
+        _ requested: String,
+        on element: AXUIElement,
+        binding: HostElementBinding,
+        window: HostWindowInfo
+    ) -> PerformedAction {
+        guard let previous = environment.elementStringValue(element) else {
+            return refused(.elementNotActionable)
+        }
+        if previous == requested {
+            return PerformedAction(
+                outcome: .ok,
+                path: .axAttribute,
+                tier: .ax,
+                verdict: hostEffectFromValueReadback(
+                    requested: requested,
+                    previous: previous,
+                    readback: previous
+                ),
+                failure: nil
+            )
+        }
+
+        let context = environment.beginSyntheticTargetFocus(
+            pid: binding.pid,
+            windowId: window.windowId
+        )
+        let result = performWebContentTextReplacementInPreparedWindow(
+            requested,
+            previous: previous,
+            on: element,
+            binding: binding
+        )
+        guard let context else {
+            return result
+        }
+        guard environment.endSyntheticTargetFocus(context) else {
+            return result.outcome == .refused || result.outcome == .failed
+                ? result
+                : unknownOutcome(path: result.path, tier: result.tier)
+        }
+        return result
+    }
+
+    private func performWebContentTextReplacementInPreparedWindow(
+        _ requested: String,
+        previous: String,
+        on element: AXUIElement,
+        binding: HostElementBinding
+    ) -> PerformedAction {
+        guard environment.setFocusedElement(element, pid: binding.pid) else {
+            return refused(.focusChanged)
+        }
+        guard environment.elementIsFocused(element) else {
+            return unknownOutcome(path: .axAttribute, tier: .ax)
+        }
+        if !previous.isEmpty, !environment.selectAllText(element) {
+            return unknownOutcome(path: .axAttribute, tier: .ax)
+        }
+
+        do {
+            if requested.isEmpty {
+                try environment.postKeyEvent(
+                    .key(name: "Backspace", modifiers: []),
+                    pid: binding.dispatchPid
+                )
+            } else {
+                try environment.postKeyEvent(
+                    .type(requested),
+                    pid: binding.dispatchPid
+                )
+            }
+        } catch {
+            return unknownOutcome(
+                path: .cgEventPid,
+                tier: .coordinateBackground
+            )
+        }
+
+        var readback = environment.elementStringValue(element)
+        for _ in 0..<5 where readback != requested {
+            Thread.sleep(forTimeInterval: 0.05)
+            readback = environment.elementStringValue(element)
+        }
+        return PerformedAction(
+            outcome: .ok,
+            path: .cgEventPid,
+            tier: .coordinateBackground,
+            verdict: hostEffectFromValueReadback(
+                requested: requested,
+                previous: previous,
+                readback: readback
+            ),
+            failure: nil
+        )
     }
 
     /// Numeric controls frequently accept an `AXValue` write without running

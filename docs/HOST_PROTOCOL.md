@@ -1364,6 +1364,17 @@ The result declares `tier: "coordinate-background"` and
 `path: "skylight_pid"`. No AXPress or JavaScript `.click()` fallback follows a
 failure.
 
+`set_value` on a renderer-owned `AXTextField` or `AXTextArea` is an exact
+background replacement rather than a silent `AXValue` assignment. The executor
+requires readable prior text, focuses the already-bound AX object, verifies that
+focus on the same object, selects the complete UTF-16 range when non-empty, and
+posts Unicode text (or Backspace for an empty replacement) only to the bound
+renderer PID. The result uses `path: "cg_event_pid"` and value readback. Missing
+readback refuses before focus; once a focus write is accepted, an uncertain
+focus, selection, or key-delivery result is `outcome_unknown` and spends the
+snapshot. There is no activate, raise, global-key, JavaScript, or screenshot-
+verification fallback.
+
 #### Numeric value and scroll semantics
 
 `set_value` preserves the live AX scalar type. A numeric control that advertises

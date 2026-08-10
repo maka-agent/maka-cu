@@ -207,17 +207,41 @@ final class FocusRequestLog {
 final class KeyEventLog {
     private let lock = NSLock()
     private(set) var posted: [HostKeyAction] = []
+    private(set) var postedPids: [pid_t] = []
     /// When set, the post throws — the executor's "attempted, the OS said no".
     var failure: Error?
 
-    func record(_ action: HostKeyAction) throws {
+    var hasPosted: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !posted.isEmpty
+    }
+
+    func record(_ action: HostKeyAction, pid: pid_t = hostTestPid) throws {
         lock.lock()
         posted.append(action)
+        postedPids.append(pid)
         lock.unlock()
 
         if let failure {
             throw failure
         }
+    }
+}
+
+final class TextElementLog {
+    var beforeValue: String?
+    var afterValue: String?
+    var selectAllSucceeds = true
+    private(set) var selectAllCount = 0
+
+    func value(afterKeyPosted: Bool) -> String? {
+        afterKeyPosted ? afterValue : beforeValue
+    }
+
+    func selectAll() -> Bool {
+        selectAllCount += 1
+        return selectAllSucceeds
     }
 }
 
@@ -384,6 +408,7 @@ struct FakeEnvironment: HostSystemEnvironment {
     var menuBar: FakeNode?
     var pointEvents = PointEventLog()
     var keyEvents = KeyEventLog()
+    var textElement = TextElementLog()
     var focusRequests = FocusRequestLog()
     var launches = AppLaunchLog()
 
@@ -417,6 +442,13 @@ struct FakeEnvironment: HostSystemEnvironment {
     func menuBarNode(pid: pid_t) -> HostAccessibilityNode? { menuBar }
     func focusedElement(pid: pid_t) -> AXUIElement? { focusRequests.currentFocus ?? focused }
     func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool { focusRequests.record(element) }
+    func elementIsFocused(_ element: AXUIElement) -> Bool {
+        focusRequests.currentFocus.map { CFEqual($0, element) } ?? false
+    }
+    func elementStringValue(_ element: AXUIElement) -> String? {
+        textElement.value(afterKeyPosted: keyEvents.hasPosted)
+    }
+    func selectAllText(_ element: AXUIElement) -> Bool { textElement.selectAll() }
     func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe { probe }
 
     func postPointEvent(
@@ -430,7 +462,7 @@ struct FakeEnvironment: HostSystemEnvironment {
     }
 
     func postKeyEvent(_ action: HostKeyAction, pid: pid_t) throws {
-        try keyEvents.record(action)
+        try keyEvents.record(action, pid: pid)
     }
 
     func postWebContentClick(
@@ -649,6 +681,8 @@ func hostTestSnapshot(
     imagePath: String? = nil,
     image: HostImageReference? = nil,
     enabled: Bool = true,
+    elementRole: String = "AXButton",
+    elementLabel: String = "Send",
     elementFrame: HostRect? = nil,
     element: AXUIElement? = nil,
     elementActions: [HostElementActionName] = [.press],
@@ -659,8 +693,8 @@ func hostTestSnapshot(
     let binding = hostTestBinding(
         token: "el_\(id)_0",
         digestInput: HostElementDigestInput(
-            role: "AXButton",
-            label: "Send",
+            role: elementRole,
+            label: elementLabel,
             frameInWindow: elementFrame?.cgRect
         ),
         enabled: enabled,
