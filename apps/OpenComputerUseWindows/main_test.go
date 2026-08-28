@@ -618,12 +618,58 @@ func TestWindowsHostProtocolSecondaryActionUsesActionResult(t *testing.T) {
 	}
 }
 
+func TestWindowsActionsPreserveAvailableScrollDirections(t *testing.T) {
+	got := windowsActions([]string{"ScrollDown", "ScrollRight"})
+	want := []string{"scroll_down", "scroll_right"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("windowsActions() = %#v, want %#v", got, want)
+	}
+}
+
+func TestWindowsVerificationDetectsToggleStateChange(t *testing.T) {
+	before := windowsHostTestSnapshot("same")
+	after := windowsHostTestSnapshot("same")
+	beforeSelected := false
+	afterSelected := true
+	before.Elements[0].Selected = &beforeSelected
+	after.Elements[0].Selected = &afterSelected
+
+	effect, verification := windowsVerification(
+		before,
+		after,
+		before.Elements[0],
+		map[string]any{"kind": "click"},
+		"quiesce",
+	)
+	if effect != "confirmed" {
+		t.Fatalf("toggle state change effect = %q, want confirmed", effect)
+	}
+	if verification["method"] != "tree_delta" || verification["observedChange"] != true {
+		t.Fatalf("unexpected verification: %#v", verification)
+	}
+}
+
 func TestWindowsHostProtocolAppIDsAreWindowSpecific(t *testing.T) {
 	first := *windowsHostTestSnapshot("first")
 	second := *windowsHostTestSnapshot("second")
 	second.WindowID = 100
 	if windowsAppID(first) == windowsAppID(second) {
 		t.Fatalf("windows sharing a process must not share app ids: %q", windowsAppID(first))
+	}
+}
+
+func TestWindowsHostProtocolAppListIncludesWindowIdentity(t *testing.T) {
+	server := newTestWindowsHostServer(t, func(request psRequest) (*psResponse, error) {
+		if request.Tool != "host_inventory" {
+			return nil, fmt.Errorf("unexpected PowerShell request: %+v", request)
+		}
+		return &psResponse{OK: true, Apps: []appSnapshot{*windowsHostTestSnapshot("before")}}, nil
+	})
+	result := server.listApps()
+	apps := result["apps"].([]map[string]any)
+	windows := apps[0]["windows"].([]map[string]any)
+	if windows[0]["windowId"] != int64(99) || windows[0]["title"] != "Untitled" {
+		t.Fatalf("unexpected app window identity: %#v", windows[0])
 	}
 }
 

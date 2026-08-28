@@ -865,12 +865,19 @@ which the executor does (§5.2).
 { "ok": true,
   "apps": [
     { "appId": "com.apple.Notes", "pid": 4711, "name": "Notes",
-      "windowCount": 2, "running": true }
+      "windowCount": 2, "running": true,
+      "windows": [
+        { "windowId": 90210, "title": "Shopping list" },
+        { "windowId": 90211, "title": "Work notes" }
+      ] }
   ] }
 ```
 
 Maps directly onto `CuAppSummary`. `appId` is defined once in §5.1; `name` is the
-display string and is never matched against.
+display string and is never matched against. `windows` is optional. When
+present, it carries the current window ids and display titles belonging to that
+entry so a caller can choose among several running windows without observing
+each candidate blindly.
 
 Note what is *not* here: `maka-cu`'s `listApps()` currently returns a rendered
 text catalogue (`ComputerUseService.swift:420-426`). Rendered text is model-facing

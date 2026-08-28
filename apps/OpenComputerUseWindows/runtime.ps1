@@ -424,7 +424,20 @@ function Get-PatternNames($element) {
             }
         }
         elseif ($programmatic -like "ScrollItemPatternIdentifiers.Pattern") { $names.Add("ScrollIntoView") }
-        elseif ($programmatic -like "ScrollPatternIdentifiers.Pattern") { $names.Add("Scroll") }
+        elseif ($programmatic -like "ScrollPatternIdentifiers.Pattern") {
+            try {
+                $scroll = $element.GetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern).Current
+                if ($scroll.VerticallyScrollable) {
+                    if ([double]$scroll.VerticalScrollPercent -gt 0) { $names.Add("ScrollUp") }
+                    if ([double]$scroll.VerticalScrollPercent -lt 100) { $names.Add("ScrollDown") }
+                }
+                if ($scroll.HorizontallyScrollable) {
+                    if ([double]$scroll.HorizontalScrollPercent -gt 0) { $names.Add("ScrollLeft") }
+                    if ([double]$scroll.HorizontalScrollPercent -lt 100) { $names.Add("ScrollRight") }
+                }
+            } catch {
+            }
+        }
         elseif ($programmatic -like "ValuePatternIdentifiers.Pattern") { $names.Add("SetValue") }
     }
     if ($names.Count -gt 0) {
@@ -525,7 +538,17 @@ function Get-ElementRecord($element, [int]$index, [int]$parentIndex, [int]$depth
     try {
         $selection = $element.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern)
         $selected = [bool]$selection.Current.IsSelected
-    } catch {}
+    } catch {
+        try {
+            $toggle = $element.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
+            $state = $toggle.Current.ToggleState
+            if ($state -eq [Windows.Automation.ToggleState]::On) {
+                $selected = $true
+            } elseif ($state -eq [Windows.Automation.ToggleState]::Off) {
+                $selected = $false
+            }
+        } catch {}
+    }
     [pscustomobject]@{
         index = $index
         parentIndex = $parentIndex

@@ -63,3 +63,32 @@ Maka already owns the model-facing Computer Use tools and host supervision. The 
 - The live-tested Windows x64 binary SHA-256 is `76734ce69b6a59ad589880cd9465758647177a72b33ab7af6c6e7220cbc2b81e`.
 - After that live matrix, a snapshot-token namespace guard was added and covered by `TestWindowsHostProtocolRejectsTokenOutsideSnapshotNamespace`; the resulting Windows x64 cross-build SHA-256 is `c5ab7e01d30f9b1b9d970524876f9979cf539553aa697e11f605105cd0e81f93`.
 - The scheduled task, Notepad process, and host process were absent after cleanup.
+- A final Maka integration matrix then exercised the exact Desktop assembly path
+  (`createComputerUseHost -> selectComputerUseBackend -> MakaCuService ->
+  maka-cu.exe host`) across Edge, Explorer, Settings, two Calculator windows,
+  Paint, and Notepad.
+- The matrix exposed and fixed two Windows UIA gaps:
+  - `ScrollPattern` had been expanded into every direction even when the current
+    element could not scroll that way. Snapshots now advertise only directions
+    supported by the current scroll state.
+  - Checkbox state was absent because UIA exposes it through `TogglePattern`,
+    not `SelectionItemPattern`. Toggle state now populates `selected`, and
+    post-action verification uses a separate mutable-state digest.
+- `apps.list` now includes optional per-entry `windows` metadata. This keeps
+  window-specific Windows app ids exact while letting callers distinguish
+  restored or multi-window applications by title before observing them.
+- The final Windows 11 matrix passed with Edge Unicode value entry, checkbox
+  toggle, button invocation, semantic scrolling, and combo selection; Explorer
+  file selection; Settings navigation and scrolling; two-window Calculator
+  isolation; Paint selection; Notepad value readback; stale-frame refusal;
+  mismatched app/window refusal; and fail-closed screenshot, launch, key, and
+  coordinate requests.
+- The final matrix result SHA-256 is
+  `984ab921b664ef05bd301fdca8f08ec70102ff21b30cb23ecbbe62b1fbf3488b`.
+- A separate model-facing tool smoke passed
+  `maka_computer.list_apps -> observe -> set_value`, returned Notepad window
+  ids and titles, read back the Unicode marker, and rejected `press_key` as
+  unsupported. Its result SHA-256 is
+  `cd1871ad9791b46de4c9aff1d432d3d2377f4e95eaea1b9b5f0ea1e9a70d6a1d`.
+- The final live-tested Windows x64 binary SHA-256 is
+  `26a92030ad8cc99643f22f62d53381e93d977f2f5820dc08768cca963453e490`.

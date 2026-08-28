@@ -252,7 +252,11 @@ func (s *windowsHostServer) listApps() map[string]any {
 			"pid":         item.App.PID,
 			"name":        item.App.Name,
 			"windowCount": 1,
-			"running":     true,
+			"windows": []map[string]any{{
+				"windowId": item.WindowID,
+				"title":    item.WindowTitle,
+			}},
+			"running": true,
 		})
 	}
 	return map[string]any{"ok": true, "apps": apps}
@@ -490,7 +494,7 @@ func windowsVerification(
 			"observedChange": false,
 		}
 	}
-	observedChange := windowDigest(before) != windowDigest(after)
+	observedChange := windowStateDigest(before) != windowStateDigest(after)
 	effect := "unverifiable"
 	if observedChange {
 		effect = "confirmed"
@@ -790,7 +794,18 @@ func windowsActions(actions []string) []string {
 			add("cancel")
 		case "scrollintoview":
 			add("scroll_to_visible")
+		case "scrollup":
+			add("scroll_up")
+		case "scrolldown":
+			add("scroll_down")
+		case "scrollleft":
+			add("scroll_left")
+		case "scrollright":
+			add("scroll_right")
 		case "scroll":
+			// Compatibility with snapshots produced by an older Windows
+			// runtime. Current snapshots publish only directions that the
+			// ScrollPattern can perform from its present position.
 			add("scroll_up")
 			add("scroll_down")
 			add("scroll_left")
@@ -838,6 +853,28 @@ func windowDigest(snapshot *appSnapshot) string {
 		digests = append(digests, recordDigest(record))
 	}
 	data, _ := json.Marshal([]any{snapshot.WindowID, snapshot.WindowTitle, snapshot.WindowBounds, digests})
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func windowStateDigest(snapshot *appSnapshot) string {
+	elements := make([]any, 0, len(snapshot.Elements))
+	for _, record := range snapshot.Elements {
+		elements = append(elements, []any{
+			recordDigest(record),
+			record.Enabled,
+			record.Focused,
+			record.Selected,
+		})
+	}
+	data, _ := json.Marshal([]any{
+		snapshot.WindowID,
+		snapshot.WindowTitle,
+		snapshot.WindowBounds,
+		snapshot.FocusedSummary,
+		snapshot.SelectedText,
+		elements,
+	})
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
