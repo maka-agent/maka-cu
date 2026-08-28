@@ -1,6 +1,6 @@
 # 架构总览
 
-这个仓库当前已经从模板收敛成一个本地 `computer-use` 项目。macOS 主线是 Swift 实现的 `maka.cu/2` executor：它只对 Maka Electron host 说话，不再自带任何面向模型的 tool 层。Windows 和 Linux 仍是实验性的 Go runtime，暴露原先那组 9 个 Computer Use tools，尚未迁到 host protocol。
+这个仓库当前已经从模板收敛成一个本地 `computer-use` 项目。macOS 主线是 Swift 实现的 `maka.cu/2` executor：它只对 Maka Electron host 说话，不再自带任何面向模型的 tool 层。Windows Go runtime 已在保留原先 9-tool CLI/MCP 兼容面的同时增加 `maka.cu/2` host 入口；Linux 仍只暴露旧接口，尚未迁到 host protocol。
 
 ## 当前目录结构
 
@@ -9,7 +9,7 @@
 - `apps/OpenComputerUseFixture`
   本地 GUI fixture app，用来承载低风险、可预测的点击/输入/滚动/拖拽验证路径。
 - `apps/OpenComputerUseWindows`
-  实验性 Windows runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP 入口会嵌入 PowerShell UI Automation bridge，构建产物是 `open-computer-use.exe`，并随已有 npm 包的 `dist/windows/<arch>/` bundled artifacts 分发。
+  实验性 Windows runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP/`maka.cu/2 host` 入口会嵌入 PowerShell UI Automation bridge，构建产物是 `open-computer-use.exe`，并随已有 npm 包的 `dist/windows/<arch>/` bundled artifacts 分发。Host 模式当前只声明 UIA 语义动作，不声明坐标、键盘、截图或 app launch 能力。
 - `apps/OpenComputerUseLinux`
   实验性 Linux runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP 入口会嵌入 Python AT-SPI bridge，构建产物是 `open-computer-use`，并随已有 npm 包的 `dist/linux/<arch>/` bundled artifacts 分发。
 - `packages/OpenComputerUseKit`
@@ -45,6 +45,7 @@
 
 ### 2. Host Protocol 层（`maka.cu/2`）
 
+- macOS Swift executor 和 Windows Go executor 都实现这一协议。Windows 复用现有 UIA/Win32 bridge，并在动作前重新解析元素、核对窗口边界和元素 digest；第一阶段只支持 `apps.list`、`window.list`、`observe` 和语义 `dispatch.element`。
 - transport 是 stdio 上的 line-framed JSON-RPC 2.0：一行一个 JSON value，UTF-8，`\n` 结尾，没有 `Content-Length`。stdout 只承载 JSON-RPC，诊断一律走 stderr。
 - 两层错误刻意分开：JSON-RPC `error` 只表示请求本身不可用（`-32000` 版本不匹配、`-32001` 未握手、`-32002` 未知 session、`-32003` 正在退出）；世界的状态一律是 `result` 里的 `{ ok: false, error: { code, message, detail } }`，`code` 是闭集，`message` 由 `code` 决定，`detail` 只有枚举和数字。
 - 当前 method：`host.hello`、`session.begin` / `session.end`、`observe`、`window.list`、`apps.list`、`permissions.check`、`apps.launch`、`dispatch.element` / `dispatch.point` / `dispatch.key`、`screen.capture`，以及 `$/cancel` notification。`capture.start` / `capture.next` / `capture.stop` 已预留，v1 一律返回 domain 结果 `not_implemented`，而不是 `-32601`——这样 feature detection 是一次稳定的字段读取，方法名也不会被别的东西占掉。
@@ -116,9 +117,10 @@
 - Go runtime 通过 `go:embed` 带上 `runtime.ps1`，执行 tool call 时临时落盘并调用 Windows PowerShell。PowerShell bridge 使用 `System.Windows.Automation` 做 app/window/element discovery、tree rendering、UIA pattern action、ValuePattern set value 和 ScrollPattern scroll；当目标 app 不暴露对应 pattern 时，fallback 到 `PostMessage` / `SendMessage` 形式的 Win32 window message。
 - Windows runtime 默认只连接已经运行的 app，不会在 `get_app_state` 找不到进程时自动 `Start-Process`，也不会默认允许 `SetFocus` secondary action；这两条前台抢占路径分别需要 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_APP_LAUNCH=1` 和 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_FOCUS_ACTIONS=1` 显式打开。`type_text` 默认优先对可写文本控件的 child HWND 发送 `EM_SETSEL` / `EM_REPLACESEL`，不再默认走可能触发前台激活的 UIA `ValuePattern.SetValue` fallback；需要旧行为时必须设置 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_UIA_TEXT_FALLBACK=1`。UIA pattern 和 Win32 message fallback 本身仍是 best-effort：很多控件可以在后台响应，但 Windows 没有一套对所有 GUI toolkit 都等价于 macOS AX 的后台键鼠输入模型。
 - 这 9 个 tool 的协议面与 macOS 主线保持一致：`list_apps`、`get_app_state`、`click`、`perform_secondary_action`、`scroll`、`drag`、`type_text`、`press_key`、`set_value`。其中 element-targeted action 会优先复用上一轮 `get_app_state` 的 runtime id / automation metadata，coordinate action 使用 screenshot/window-relative 坐标。
+- Windows `maka.cu/2` host 会保留 PowerShell/UIA 返回的具体 dispatch 错误，而不是把所有失败压成无细节的 `dispatch_refused`。当调用方请求 `observeAfter.settle: "quiesce"` 时，host 会重复采样目标窗口，只有连续 window digest 一致才报告 `quiesced: true`，并返回实际等待时间；`set_value` 使用 value readback，secondary action 使用 action result，click/scroll 使用 tree delta。
 - Windows `click_method=accessibility` 映射到 UI Automation pattern，`app_post` 映射到 HWND `PostMessage`；macOS-only 的 `sky_click` 和没有实现的 `global` 都会在 snapshot lookup 前明确返回 unsupported。`auto` 仍保持 UIA 优先、window message fallback 的现有行为。
 - Windows UI Automation 需要运行在已登录用户的桌面 session 里。通过 SSH 作为脱离桌面的后台进程运行时，PowerShell 可以启动并返回 JSON，但系统可能不给它暴露顶层窗口；这种情况下 `list_apps` 会是空，`get_app_state` 可能返回 `appNotFound(...)`。
-- 当前 Windows 侧仍是功能性第一版：没有 visual cursor overlay、没有 installer/onboarding、没有 code signing，也没有独立的 Windows smoke fixture。后续 TODO 记录在 `docs/exec-plans/active/20260422-windows-computer-use-runtime.md`。
+- 当前 Windows 侧仍是功能性第一版：没有 visual cursor overlay、没有 installer/onboarding、没有 code signing，也没有纳入仓库/CI 的独立 Windows smoke fixture。已在真实 Win11 交互式桌面验证 Edge、Explorer、Settings、Notepad、Paint 和 Calculator；后续 TODO 记录在 `docs/exec-plans/active/20260422-windows-computer-use-runtime.md`。
 
 ### 7. Linux Runtime
 

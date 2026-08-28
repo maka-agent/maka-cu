@@ -9,6 +9,7 @@
 - 包含：
   - Windows 独立 runtime，不耦合 Swift `.app`。
   - Go CLI / MCP / `call --calls` 入口。
+  - Maka Desktop 使用的 `maka.cu/2` host protocol 入口。
   - `list_apps`、`get_app_state`、`click`、`perform_secondary_action`、`scroll`、`drag`、`type_text`、`press_key`、`set_value` 的功能性实现。
   - Windows `.exe` 构建脚本和基础 Go 单测。
   - 架构文档、README 和 history。
@@ -77,11 +78,16 @@
 - [x] 收紧 Windows 后台运行默认策略：找不到 app 时不再自动启动，`SetFocus` 默认禁用，只能通过环境变量显式开启。
 - [x] 将 `type_text` 默认路径从 UIA `ValuePattern.SetValue` 改为 child HWND `EM_SETSEL` / `EM_REPLACESEL` 优先；可能把 app 带到前台的 UIA text fallback 改成环境变量显式开启。
 - [x] 通过交互式 Windows scheduled task 验证新 `type_text` 路径：`get_app_state -> type_text -> get_app_state` 三步均 `isError=false`，Notepad 文本包含 `bgmsg-*` marker，前台窗口调用前后均为 Codex。
-- [ ] 在交互式 Windows 桌面 session 补 Notepad / Edge 等真实 UI action smoke。
+- [x] 在交互式 Windows 桌面 session 完成 Notepad `maka.cu/2` host smoke：握手、枚举、249 节点 observe、`set_value`、post-action 回读、spent snapshot 拒绝与 unsupported key 拒绝均通过。
+- [x] 在交互式 Windows 桌面 session 补 Calculator、Paint、Notepad 多应用语义动作与 stale/window-gone 矩阵。
+- [x] 在交互式 Windows 桌面 session 补 Edge 真实 UI action smoke。
 - [ ] 增加 Windows fixture 和可重复 smoke runner。
 - [ ] 评估用 `PrintWindow` / Windows Graphics Capture 补一条不依赖窗口可见性的 background screenshot 路径。
 - [ ] 为必须依赖前台输入的 app/toolkit 场景补更明确的 capability/error，避免静默退到抢焦点行为。
 - [x] 将 Windows artifact 接入 npm release packaging，作为既有 npm root/alias packages 的 bundled artifacts 分发。
+- [x] 在 Windows runtime 增加 `maka.cu/2 host`，复用 UIA snapshot/action 实现 apps/window inventory、observe、semantic element dispatch、snapshot 单次消费和动作前 stale 校验。
+- [x] 在 Maka Desktop 增加 Windows backend 选择、`.exe` 完整性校验和本地构建准备入口。
+- [ ] 在真实 Windows Maka Desktop 中完成端到端 smoke，并补 Authenticode 签名后把 `distributionReady` 设为 true。
 - [ ] 补 Windows signing / installer 方案。
 - [ ] 评估把 PowerShell bridge 替换为原生 Go COM/UIA 的收益和风险。
 
@@ -97,3 +103,9 @@
 - 2026-04-22：Notepad 实测反馈 `type_text` 的 UIA `ValuePattern.SetValue` 会把窗口带到前台；默认改为 child HWND `EM_REPLACESEL` 后台消息路径，旧 UIA fallback 需要 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_UIA_TEXT_FALLBACK=1`。
 - 2026-04-22：Windows 交互式 scheduled task 验证显示新 `type_text` 能写入 Notepad 且不会把前台从 Codex 切到 Notepad；Notepad 文本控件 UIA class 为 `RichEditD2DPT`，有 child native handle，可接收 `EM_REPLACESEL`。
 - 2026-04-23：Windows release artifact 接入 npm package bundled artifacts，不新增系统 installer/signing；root `open-computer-use` package 通过 launcher 按 `win32-arm64` / `win32-x64` 自动选择 `.exe`。
+- 2026-08-28：Maka Desktop 不再通过 MCP 适配 Windows executor；Windows Go runtime 直接实现 `maka.cu/2`，沿用 host 的 session/snapshot/token/digest 边界。第一阶段只声明 UIA 语义动作，坐标、键盘、截图和 app launch 显式保持 `not_implemented`。
+- 2026-08-28：Win11 真机 smoke 首轮暴露 action-time stale 校验把 JSON `null` 与 PowerShell 空字符串视为不同，导致刚观察到的 Notepad 文本区被误判 `element_changed`；比较前归一化缺失字符串后，`ValuePattern.SetValue` 与 post-action snapshot 回读通过。
+- 2026-08-28：Win11 多应用矩阵暴露 UWP 顶层窗口会共享 `ApplicationFrameHost` PID，且仅靠 `Process.MainWindowHandle` 会丢失调用方选择的 HWND。Host app ID 改为绑定 `(pid, HWND)`，PowerShell 在 observe、dispatch 和 post-action snapshot 全程校验同一 HWND 的存在性与进程归属。
+- 2026-08-28：同一 `ApplicationFrameHost` PID 下两个 Calculator 窗口的隔离验证通过；操作一个窗口得到 `Display is 3` 时，另一个窗口保持 `Display is 0`，关闭前者后后者仍存活。
+- 2026-08-28：真实 Edge 夹具通过 `set_value` 中文/符号往返、checkbox、button、ScrollPattern 和 combo expand；Explorer 通过两个文件项的 SelectionItem 切换和 View menu 展开；Settings 通过 Bluetooth & devices / System 导航及内容区滚动。
+- 2026-08-28：Settings 动画暴露 Windows host 固定回报 `120ms / quiesced=true` 并不可信。Host 改为按连续 window digest 做真实 settle、报告实测 `waitedMs`/`reason`，同时按协议分别使用 `value_readback`、`action_result` 和 `tree_delta`。

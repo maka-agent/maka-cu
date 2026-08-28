@@ -39,6 +39,12 @@ public static class OCUWin32 {
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 
     [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern UInt32 GetWindowThreadProcessId(IntPtr hWnd, out UInt32 processId);
+
+    [DllImport("user32.dll")]
     public static extern bool ScreenToClient(IntPtr hWnd, ref POINT point);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -329,6 +335,27 @@ function Resolve-App([string]$query) {
     throw "appNotFound(`"$query`")"
 }
 
+function Resolve-WindowProcess([string]$query, [int64]$windowId = 0) {
+    if ($windowId -le 0) {
+        return Resolve-App $query
+    }
+    $hwnd = [IntPtr]$windowId
+    if (-not [OCUWin32]::IsWindow($hwnd)) {
+        Throw-HostFailure "window_gone" "the bound window no longer exists"
+    }
+    $ownerPid = [uint32]0
+    [void][OCUWin32]::GetWindowThreadProcessId($hwnd, [ref]$ownerPid)
+    $expectedPid = 0
+    if ([int]::TryParse($query, [ref]$expectedPid) -and $expectedPid -ne [int]$ownerPid) {
+        Throw-HostFailure "window_gone" "the bound window no longer belongs to the target process"
+    }
+    try {
+        return Get-Process -Id ([int]$ownerPid) -ErrorAction Stop
+    } catch {
+        Throw-HostFailure "window_gone" "the process owning the bound window no longer exists"
+    }
+}
+
 function Get-MainElement($process) {
     if ($process.MainWindowHandle -ne 0) {
         return [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$process.MainWindowHandle)
@@ -341,8 +368,28 @@ function Get-MainElement($process) {
     throw "No top-level UI Automation window is available for $($process.ProcessName). Run the Windows runtime in the signed-in desktop session."
 }
 
-function Get-WindowBounds($process, $element) {
-    $hwnd = [IntPtr]$process.MainWindowHandle
+function Get-WindowElement($process, [int64]$windowId = 0) {
+    if ($windowId -le 0) {
+        return Get-MainElement $process
+    }
+    $hwnd = [IntPtr]$windowId
+    $ownerPid = [uint32]0
+    if (-not [OCUWin32]::IsWindow($hwnd)) {
+        Throw-HostFailure "window_gone" "the bound window no longer exists"
+    }
+    [void][OCUWin32]::GetWindowThreadProcessId($hwnd, [ref]$ownerPid)
+    if ([int]$ownerPid -ne [int]$process.Id) {
+        Throw-HostFailure "window_gone" "the bound window no longer belongs to the target process"
+    }
+    try {
+        return [Windows.Automation.AutomationElement]::FromHandle($hwnd)
+    } catch {
+        Throw-HostFailure "window_gone" "the bound window is no longer available through UI Automation"
+    }
+}
+
+function Get-WindowBounds($process, $element, [int64]$windowId = 0) {
+    $hwnd = if ($windowId -gt 0) { [IntPtr]$windowId } else { [IntPtr]$process.MainWindowHandle }
     if ($hwnd -ne [IntPtr]::Zero) {
         $fromWin32 = Get-WindowRectFrame $hwnd
         if ($null -ne $fromWin32) {
@@ -466,12 +513,23 @@ function Get-ElementValue($element, $TextLimit = $script:DefaultTextLimit) {
     }
 }
 
-function Get-ElementRecord($element, [int]$index, $windowBounds, $TextLimit = $script:DefaultTextLimit) {
+function Get-ElementRecord($element, [int]$index, [int]$parentIndex, [int]$depth, $windowBounds, $TextLimit = $script:DefaultTextLimit) {
     $frame = Get-ElementFrame $element $windowBounds
     $runtimeId = @()
     try { $runtimeId = @($element.GetRuntimeId()) } catch {}
+    $enabled = $false
+    $focused = $false
+    $selected = $null
+    try { $enabled = [bool]$element.Current.IsEnabled } catch {}
+    try { $focused = [bool]$element.Current.HasKeyboardFocus } catch {}
+    try {
+        $selection = $element.GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern)
+        $selected = [bool]$selection.Current.IsSelected
+    } catch {}
     [pscustomobject]@{
         index = $index
+        parentIndex = $parentIndex
+        depth = $depth
         runtimeId = $runtimeId
         automationId = Get-ElementString $element "AutomationId"
         name = Limit-Text (Get-ElementString $element "Name") $TextLimit
@@ -482,6 +540,9 @@ function Get-ElementRecord($element, [int]$index, $windowBounds, $TextLimit = $s
         nativeWindowHandle = Get-ElementInt64 $element "NativeWindowHandle"
         frame = $frame
         actions = @(Get-PatternNames $element)
+        enabled = $enabled
+        focused = $focused
+        selected = $selected
     }
 }
 
@@ -503,7 +564,7 @@ function Render-Tree($element, $windowBounds, $TextLimit = $script:DefaultTextLi
     $effectiveMaxTreeNodes = if ($MaxTreeNodes -gt 0) { $MaxTreeNodes } else { $script:AccessibilityTreeMaxNodeCount }
     $effectiveMaxTreeDepth = if ($MaxTreeDepth -gt 0) { $MaxTreeDepth } else { $script:AccessibilityTreeMaxDepth }
 
-    function Visit($node, [int]$depth) {
+    function Visit($node, [int]$depth, [int]$parentIndex) {
         if ($script:nextIndex -ge $script:MaxTreeNodes -or $depth -gt $script:MaxTreeDepth) {
             return
         }
@@ -515,7 +576,7 @@ function Render-Tree($element, $windowBounds, $TextLimit = $script:DefaultTextLi
 
         $index = $script:nextIndex
         $script:nextIndex++
-        $record = Get-ElementRecord $node $index $script:windowBounds $TextLimit
+        $record = Get-ElementRecord $node $index $parentIndex $depth $script:windowBounds $TextLimit
         $script:records.Add($record)
 
         $role = $record.localizedControlType
@@ -541,7 +602,7 @@ function Render-Tree($element, $windowBounds, $TextLimit = $script:DefaultTextLi
         try {
             $children = $node.FindAll([Windows.Automation.TreeScope]::Children, [Windows.Automation.Condition]::TrueCondition)
             for ($i = 0; $i -lt $children.Count; $i++) {
-                Visit $children.Item($i) ($depth + 1)
+                Visit $children.Item($i) ($depth + 1) $index
             }
         } catch {
         }
@@ -554,7 +615,7 @@ function Render-Tree($element, $windowBounds, $TextLimit = $script:DefaultTextLi
     $script:windowBounds = $windowBounds
     $script:MaxTreeNodes = $effectiveMaxTreeNodes
     $script:MaxTreeDepth = $effectiveMaxTreeDepth
-    Visit $element 0
+    Visit $element 0 -1
 
     [pscustomobject]@{
         records = $records.ToArray()
@@ -615,24 +676,41 @@ function Get-SelectedText($processId, $TextLimit = $script:DefaultTextLimit) {
     return $null
 }
 
-function Build-Snapshot([string]$query, $TextLimit = $script:DefaultTextLimit, [int]$MaxTreeNodes = $script:AccessibilityTreeMaxNodeCount, [int]$MaxTreeDepth = $script:AccessibilityTreeMaxDepth) {
-    $process = Resolve-App $query
-    $element = Get-MainElement $process
-    $bounds = Get-WindowBounds $process $element
+function Build-Snapshot([string]$query, $TextLimit = $script:DefaultTextLimit, [int]$MaxTreeNodes = $script:AccessibilityTreeMaxNodeCount, [int]$MaxTreeDepth = $script:AccessibilityTreeMaxDepth, [bool]$IncludeScreenshot = $true, [int64]$WindowId = 0) {
+    $process = Resolve-WindowProcess $query $WindowId
+    $element = Get-WindowElement $process $WindowId
+    $actualWindowId = if ($WindowId -gt 0) { $WindowId } else { [int64]$process.MainWindowHandle }
+    $bounds = Get-WindowBounds $process $element $actualWindowId
     $rendered = Render-Tree $element $bounds $TextLimit $MaxTreeNodes $MaxTreeDepth
+    $effectiveMaxTreeNodes = if ($MaxTreeNodes -gt 0) { $MaxTreeNodes } else { $script:AccessibilityTreeMaxNodeCount }
+    $windowTitle = $process.MainWindowTitle
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($element.Current.Name)) {
+            $windowTitle = $element.Current.Name
+        }
+    } catch {}
+    $appName = $process.ProcessName
+    if (
+        $appName -ieq "ApplicationFrameHost" -and
+        -not [string]::IsNullOrWhiteSpace($windowTitle)
+    ) {
+        $appName = $windowTitle
+    }
     [pscustomobject]@{
         app = [pscustomobject]@{
-            name = $process.ProcessName
+            name = $appName
             bundleIdentifier = $process.ProcessName
             pid = [int]$process.Id
         }
-        windowTitle = Limit-Text $process.MainWindowTitle $TextLimit
+        windowId = [int64]$actualWindowId
+        windowTitle = Limit-Text $windowTitle $TextLimit
         windowBounds = $bounds
-        screenshotPngBase64 = Capture-WindowPngBase64 $bounds
+        screenshotPngBase64 = if ($IncludeScreenshot) { Capture-WindowPngBase64 $bounds } else { $null }
         treeLines = @($rendered.lines)
         focusedSummary = Get-FocusedSummary $process.Id $TextLimit
         selectedText = Get-SelectedText $process.Id $TextLimit
         elements = @($rendered.records)
+        treeTruncated = ($rendered.records.Count -ge $effectiveMaxTreeNodes)
     }
 }
 
@@ -646,6 +724,43 @@ function List-Apps {
         $lines.Add(("{0} -- {1} [running, pid={2}, window={3}]" -f $process.ProcessName, $process.ProcessName, $process.Id, $title))
     }
     return ($lines -join "`n")
+}
+
+function List-AppSnapshots {
+    $items = New-Object System.Collections.Generic.List[object]
+    $windows = [Windows.Automation.AutomationElement]::RootElement.FindAll(
+        [Windows.Automation.TreeScope]::Children,
+        [Windows.Automation.Condition]::TrueCondition
+    )
+    for ($i = 0; $i -lt $windows.Count; $i++) {
+        try {
+            $window = $windows.Item($i)
+            $pidValue = [int]$window.Current.ProcessId
+            $windowId = [int64]$window.Current.NativeWindowHandle
+            if ($pidValue -le 0 -or $windowId -le 0) { continue }
+            $process = Get-Process -Id $pidValue -ErrorAction Stop
+            $bounds = Get-WindowBounds $process $window $windowId
+            if ($null -eq $bounds -or $bounds.width -le 0 -or $bounds.height -le 0) { continue }
+            $appName = $process.ProcessName
+            if (
+                $appName -ieq "ApplicationFrameHost" -and
+                -not [string]::IsNullOrWhiteSpace($window.Current.Name)
+            ) {
+                $appName = $window.Current.Name
+            }
+            $items.Add([pscustomobject]@{
+                app = [pscustomobject]@{
+                    name = $appName
+                    bundleIdentifier = $process.ProcessName
+                    pid = [int]$process.Id
+                }
+                windowId = $windowId
+                windowTitle = Limit-Text $window.Current.Name $script:DefaultTextLimit
+                windowBounds = $bounds
+            })
+        } catch {}
+    }
+    return $items.ToArray()
 }
 
 function Same-RuntimeId($left, $right) {
@@ -673,11 +788,13 @@ function Get-AllElements($root) {
     return $items.ToArray()
 }
 
-function Find-Element($process, $record) {
+function Find-Element($process, $record, $root = $null) {
     if ($null -eq $record) {
         return $null
     }
-    $root = Get-MainElement $process
+    if ($null -eq $root) {
+        $root = Get-MainElement $process
+    }
     foreach ($element in (Get-AllElements $root)) {
         try {
             if (Same-RuntimeId @($element.GetRuntimeId()) @($record.runtimeId)) {
@@ -698,6 +815,42 @@ function Find-Element($process, $record) {
         }
     }
     return $null
+}
+
+function Test-FrameEqual($left, $right) {
+    if ($null -eq $left -or $null -eq $right) {
+        return $null -eq $left -and $null -eq $right
+    }
+    return (
+        [math]::Abs([double]$left.x - [double]$right.x) -lt 0.5 -and
+        [math]::Abs([double]$left.y - [double]$right.y) -lt 0.5 -and
+        [math]::Abs([double]$left.width - [double]$right.width) -lt 0.5 -and
+        [math]::Abs([double]$left.height - [double]$right.height) -lt 0.5
+    )
+}
+
+function Normalize-ElementText($value) {
+    if ($null -eq $value) {
+        return ""
+    }
+    return [string]$value
+}
+
+function Get-ChangedElementFields($expected, $current) {
+    $changed = New-Object System.Collections.Generic.List[string]
+    if ((Normalize-ElementText $expected.controlType) -ne (Normalize-ElementText $current.controlType)) { $changed.Add("role") }
+    if ((Normalize-ElementText $expected.automationId) -ne (Normalize-ElementText $current.automationId)) { $changed.Add("axIdentifier") }
+    if ((Normalize-ElementText $expected.name) -ne (Normalize-ElementText $current.name)) { $changed.Add("label") }
+    if ((Normalize-ElementText $expected.value) -ne (Normalize-ElementText $current.value)) { $changed.Add("value") }
+    if (-not (Test-FrameEqual $expected.frame $current.frame)) { $changed.Add("frame") }
+    if ((@($expected.actions) -join "`n") -ne (@($current.actions) -join "`n")) {
+        $changed.Add("actions")
+    }
+    return $changed.ToArray()
+}
+
+function Throw-HostFailure([string]$code, [string]$message) {
+    throw "[maka-cu:$code] $message"
 }
 
 function Get-CurrentPatternOrNull($element, $pattern) {
@@ -899,15 +1052,37 @@ $operationJson = [System.IO.File]::ReadAllText($OperationPath, [System.Text.Enco
 $operation = $operationJson | ConvertFrom-Json
 
 try {
+    $includeScreenshot = $true
+    if ($null -ne $operation.include_screenshot) {
+        $includeScreenshot = [bool]$operation.include_screenshot
+    }
     if ($operation.tool -eq "list_apps") {
         $response = [pscustomobject]@{ ok = $true; text = (List-Apps) }
+    } elseif ($operation.tool -eq "host_inventory") {
+        $response = [pscustomobject]@{ ok = $true; apps = @(List-AppSnapshots) }
     } elseif ($operation.tool -eq "get_app_state") {
-        $response = [pscustomobject]@{ ok = $true; snapshot = (Build-Snapshot $operation.app (Resolve-TextLimit $operation.text_limit) ([int]$operation.max_tree_nodes) ([int]$operation.max_tree_depth)) }
+        $response = [pscustomobject]@{ ok = $true; snapshot = (Build-Snapshot $operation.app (Resolve-TextLimit $operation.text_limit) ([int]$operation.max_tree_nodes) ([int]$operation.max_tree_depth) $includeScreenshot ([int64]$operation.windowId)) }
     } else {
-        $process = Resolve-App $operation.app
-        $hwnd = [IntPtr]$process.MainWindowHandle
+        $windowId = [int64]$operation.windowId
+        $process = Resolve-WindowProcess $operation.app $windowId
+        $root = Get-WindowElement $process $windowId
+        $hwnd = if ($windowId -gt 0) { [IntPtr]$windowId } else { [IntPtr]$process.MainWindowHandle }
         $windowBounds = $operation.windowBounds
-        $element = Find-Element $process $operation.element
+        $element = Find-Element $process $operation.element $root
+        if ($null -ne $operation.element) {
+            if ($null -eq $element) {
+                Throw-HostFailure "element_released" "the bound UI Automation element no longer exists"
+            }
+            $currentWindowBounds = Get-WindowBounds $process $root $windowId
+            if (-not (Test-FrameEqual $windowBounds $currentWindowBounds)) {
+                Throw-HostFailure "window_changed" "the target window bounds changed after observation"
+            }
+            $currentRecord = Get-ElementRecord $element ([int]$operation.element.index) ([int]$operation.element.parentIndex) ([int]$operation.element.depth) $currentWindowBounds
+            $changedFields = @(Get-ChangedElementFields $operation.element $currentRecord)
+            if ($changedFields.Count -gt 0) {
+                Throw-HostFailure "element_changed" ("the bound UI Automation element changed: " + ($changedFields -join ","))
+            }
+        }
 
         switch ($operation.tool) {
             "click" {
@@ -995,14 +1170,21 @@ try {
         }
 
         Start-Sleep -Milliseconds 120
-        $response = [pscustomobject]@{ ok = $true; snapshot = (Build-Snapshot $operation.app) }
+        $response = [pscustomobject]@{ ok = $true; snapshot = (Build-Snapshot $operation.app $script:DefaultTextLimit $script:AccessibilityTreeMaxNodeCount $script:AccessibilityTreeMaxDepth $includeScreenshot $windowId) }
     }
 } catch {
     $message = $_.Exception.Message
-    if (-not [string]::IsNullOrWhiteSpace($_.ScriptStackTrace)) {
+    $errorCode = ""
+    $structuredFailure = $false
+    if ($message -match "^\[maka-cu:([a-z_]+)\]\s*(.*)$") {
+        $errorCode = $Matches[1]
+        $message = $Matches[2]
+        $structuredFailure = $true
+    }
+    if (-not $structuredFailure -and -not [string]::IsNullOrWhiteSpace($_.ScriptStackTrace)) {
         $message = "$message at $($_.ScriptStackTrace)"
     }
-    $response = [pscustomobject]@{ ok = $false; error = $message }
+    $response = [pscustomobject]@{ ok = $false; error = $message; errorCode = $errorCode }
 }
 
 $response | ConvertTo-Json -Depth 50 -Compress

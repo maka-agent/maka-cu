@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -242,6 +244,502 @@ func TestCLIHelpMentionsWindowsRuntime(t *testing.T) {
 	}
 }
 
+func TestWindowsHostProtocolHandshakeDeclaresSemanticOnlyCapabilities(t *testing.T) {
+	server := newTestWindowsHostServer(t, func(request psRequest) (*psResponse, error) {
+		t.Fatalf("unexpected PowerShell request: %+v", request)
+		return nil, nil
+	})
+	result, rpcError := server.hello(map[string]any{
+		"protocol": windowsHostProtocolVersion,
+		"imageDir": t.TempDir(),
+	})
+	if rpcError != nil {
+		t.Fatalf("hello failed: %+v", rpcError)
+	}
+	capabilities := result["capabilities"].(map[string]any)
+	if got := capabilities["elementActions"]; !reflect.DeepEqual(
+		got,
+		[]string{"click", "set_value", "secondary_action", "scroll"},
+	) {
+		t.Fatalf("unexpected element actions: %#v", got)
+	}
+	if got := capabilities["pointActions"]; !reflect.DeepEqual(got, []string{}) {
+		t.Fatalf("point actions must remain disabled: %#v", got)
+	}
+	if got := capabilities["keyActions"]; !reflect.DeepEqual(got, []string{}) {
+		t.Fatalf("key actions must remain disabled: %#v", got)
+	}
+}
+
+func TestWindowsHostProtocolObserveAndDispatchSpendSnapshot(t *testing.T) {
+	var calls []psRequest
+	server := newTestWindowsHostServer(t, func(request psRequest) (*psResponse, error) {
+		calls = append(calls, request)
+		switch request.Tool {
+		case "host_inventory":
+			return &psResponse{OK: true, Apps: []appSnapshot{*windowsHostTestSnapshot("before")}}, nil
+		case "get_app_state":
+			return &psResponse{OK: true, Snapshot: windowsHostTestSnapshot("before")}, nil
+		case "click":
+			return &psResponse{OK: true, Snapshot: windowsHostTestSnapshot("after")}, nil
+		default:
+			return nil, fmt.Errorf("unexpected tool %q", request.Tool)
+		}
+	})
+	handshakeWindowsHost(t, server)
+	if _, rpcError := server.beginSession(map[string]any{"session": "s1"}); rpcError != nil {
+		t.Fatal(rpcError)
+	}
+	observed := server.observe(map[string]any{
+		"session": "s1",
+		"target": map[string]any{
+			"kind": "app",
+			"app":  windowsAppID(*windowsHostTestSnapshot("before")),
+		},
+	})
+	if observed["ok"] != true {
+		t.Fatalf("observe failed: %#v", observed)
+	}
+	if calls[1].WindowID != 99 {
+		t.Fatalf("observe did not preserve exact window id: %+v", calls[1])
+	}
+	wire := observed["snapshot"].(map[string]any)
+	snapshotID := wire["snapshotId"].(string)
+	element := wire["elements"].([]map[string]any)[0]
+	params := map[string]any{
+		"session":             "s1",
+		"snapshotId":          snapshotID,
+		"toolCallId":          "call-1",
+		"elementToken":        element["token"],
+		"expectElementDigest": element["digest"],
+		"action":              map[string]any{"kind": "click"},
+	}
+	dispatched := server.dispatchElement(params)
+	if dispatched["ok"] != true || dispatched["effect"] != "unverifiable" {
+		t.Fatalf("dispatch failed: %#v", dispatched)
+	}
+	verification := dispatched["verification"].(map[string]any)
+	if verification["method"] != "none" || verification["observedChange"] != false {
+		t.Fatalf("dispatch without settle used observation evidence: %#v", verification)
+	}
+	if calls[2].WindowID != 99 {
+		t.Fatalf("dispatch did not preserve exact window id: %+v", calls[2])
+	}
+	replayed := server.dispatchElement(params)
+	if replayed["ok"] != false {
+		t.Fatalf("spent snapshot replay succeeded: %#v", replayed)
+	}
+	errorBody := replayed["error"].(map[string]any)
+	if errorBody["code"] != "snapshot_spent" {
+		t.Fatalf("unexpected replay error: %#v", errorBody)
+	}
+}
+
+func TestWindowsHostProtocolRejectsUnsupportedDispatchFamilies(t *testing.T) {
+	server := newTestWindowsHostServer(t, func(request psRequest) (*psResponse, error) {
+		return nil, fmt.Errorf("unexpected PowerShell request: %+v", request)
+	})
+	handshakeWindowsHost(t, server)
+	if _, rpcError := server.beginSession(map[string]any{"session": "s1"}); rpcError != nil {
+		t.Fatal(rpcError)
+	}
+	response := server.handle(hostRPCRequest{
+		JSONRPC: "2.0",
+		ID:      3,
+		Method:  "dispatch.key",
+		Params:  map[string]any{"session": "s1"},
+	})
+	if response.Result["ok"] != false {
+		t.Fatalf("unsupported dispatch succeeded: %#v", response.Result)
+	}
+	errorBody := response.Result["error"].(map[string]any)
+	if errorBody["code"] != "not_implemented" {
+		t.Fatalf("unexpected error: %#v", errorBody)
+	}
+}
+
+func TestWindowsHostProtocolRejectsTokenOutsideSnapshotNamespace(t *testing.T) {
+	server := newTestWindowsHostServer(t, func(request psRequest) (*psResponse, error) {
+		switch request.Tool {
+		case "host_inventory":
+			return &psResponse{OK: true, Apps: []appSnapshot{*windowsHostTestSnapshot("before")}}, nil
+		case "get_app_state":
+			return &psResponse{OK: true, Snapshot: windowsHostTestSnapshot("before")}, nil
+		default:
+			return nil, fmt.Errorf("unexpected tool %q", request.Tool)
+		}
+	})
+	handshakeWindowsHost(t, server)
+	if _, rpcError := server.beginSession(map[string]any{"session": "s1"}); rpcError != nil {
+		t.Fatal(rpcError)
+	}
+	observed := server.observe(map[string]any{
+		"session": "s1",
+		"target": map[string]any{
+			"kind": "app",
+			"app":  windowsAppID(*windowsHostTestSnapshot("before")),
+		},
+	})
+	wire := observed["snapshot"].(map[string]any)
+	element := wire["elements"].([]map[string]any)[0]
+	result := server.dispatchElement(map[string]any{
+		"session":             "s1",
+		"snapshotId":          wire["snapshotId"],
+		"toolCallId":          "call-forged-token",
+		"elementToken":        "0",
+		"expectElementDigest": element["digest"],
+		"action":              map[string]any{"kind": "click"},
+	})
+	errorBody := result["error"].(map[string]any)
+	if errorBody["code"] != "element_unknown" {
+		t.Fatalf("unexpected error: %#v", errorBody)
+	}
+}
+
+func TestWindowsHostProtocolUsesRPCErrorForUnknownSession(t *testing.T) {
+	server := newTestWindowsHostServer(t, func(request psRequest) (*psResponse, error) {
+		return nil, fmt.Errorf("unexpected PowerShell request: %+v", request)
+	})
+	handshakeWindowsHost(t, server)
+	response := server.handle(hostRPCRequest{
+		JSONRPC: "2.0",
+		ID:      4,
+		Method:  "observe",
+		Params:  map[string]any{"session": "missing"},
+	})
+	if response.Error == nil || response.Error.Code != -32002 {
+		t.Fatalf("unknown session did not use JSON-RPC error: %#v", response)
+	}
+}
+
+func TestWindowsHostProtocolMapsLiveElementChange(t *testing.T) {
+	server := newTestWindowsHostServer(t, func(request psRequest) (*psResponse, error) {
+		switch request.Tool {
+		case "host_inventory":
+			return &psResponse{OK: true, Apps: []appSnapshot{*windowsHostTestSnapshot("before")}}, nil
+		case "get_app_state":
+			return &psResponse{OK: true, Snapshot: windowsHostTestSnapshot("before")}, nil
+		case "click":
+			return &psResponse{
+				OK:        false,
+				ErrorCode: "element_changed",
+				Error:     "the bound UI Automation element changed: value,frame",
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected PowerShell request: %+v", request)
+		}
+	})
+	handshakeWindowsHost(t, server)
+	if _, rpcError := server.beginSession(map[string]any{"session": "s1"}); rpcError != nil {
+		t.Fatal(rpcError)
+	}
+	observed := server.observe(map[string]any{
+		"session": "s1",
+		"target": map[string]any{
+			"kind": "app",
+			"app":  windowsAppID(*windowsHostTestSnapshot("before")),
+		},
+	})
+	wire := observed["snapshot"].(map[string]any)
+	element := wire["elements"].([]map[string]any)[0]
+	result := server.dispatchElement(map[string]any{
+		"session":             "s1",
+		"snapshotId":          wire["snapshotId"],
+		"toolCallId":          "call-2",
+		"elementToken":        element["token"],
+		"expectElementDigest": element["digest"],
+		"action":              map[string]any{"kind": "click"},
+	})
+	errorBody := result["error"].(map[string]any)
+	if errorBody["code"] != "element_changed" {
+		t.Fatalf("unexpected error: %#v", errorBody)
+	}
+	detail := errorBody["detail"].(map[string]any)
+	if !reflect.DeepEqual(detail["changed"], []string{"value", "frame"}) {
+		t.Fatalf("unexpected changed fields: %#v", detail)
+	}
+}
+
+func TestWindowsHostProtocolPreservesDispatchFailureMessage(t *testing.T) {
+	server := newTestWindowsHostServer(t, func(request psRequest) (*psResponse, error) {
+		switch request.Tool {
+		case "host_inventory":
+			return &psResponse{OK: true, Apps: []appSnapshot{*windowsHostTestSnapshot("before")}}, nil
+		case "get_app_state":
+			return &psResponse{OK: true, Snapshot: windowsHostTestSnapshot("before")}, nil
+		case "set_value":
+			return &psResponse{
+				OK:    false,
+				Error: "ValuePattern.SetValue failed for this provider",
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected tool %q", request.Tool)
+		}
+	})
+	handshakeWindowsHost(t, server)
+	if _, rpcError := server.beginSession(map[string]any{"session": "s1"}); rpcError != nil {
+		t.Fatal(rpcError)
+	}
+	observed := server.observe(map[string]any{
+		"session": "s1",
+		"target": map[string]any{
+			"kind": "app",
+			"app":  windowsAppID(*windowsHostTestSnapshot("before")),
+		},
+	})
+	wire := observed["snapshot"].(map[string]any)
+	element := wire["elements"].([]map[string]any)[0]
+	result := server.dispatchElement(map[string]any{
+		"session":             "s1",
+		"snapshotId":          wire["snapshotId"],
+		"toolCallId":          "call-refused",
+		"elementToken":        element["token"],
+		"expectElementDigest": element["digest"],
+		"action": map[string]any{
+			"kind":  "set_value",
+			"value": "replacement",
+		},
+	})
+	errorBody := result["error"].(map[string]any)
+	if errorBody["code"] != "dispatch_refused" {
+		t.Fatalf("unexpected error code: %#v", errorBody)
+	}
+	if errorBody["message"] != "ValuePattern.SetValue failed for this provider" {
+		t.Fatalf("runtime failure message was lost: %#v", errorBody)
+	}
+}
+
+func TestWindowsHostProtocolQuiescesAndReadsBackSetValue(t *testing.T) {
+	after := windowsHostTestSnapshot("updated")
+	getStateCalls := 0
+	server := newTestWindowsHostServer(t, func(request psRequest) (*psResponse, error) {
+		switch request.Tool {
+		case "host_inventory":
+			return &psResponse{OK: true, Apps: []appSnapshot{*windowsHostTestSnapshot("before")}}, nil
+		case "get_app_state":
+			getStateCalls++
+			if getStateCalls == 1 {
+				return &psResponse{OK: true, Snapshot: windowsHostTestSnapshot("before")}, nil
+			}
+			return &psResponse{OK: true, Snapshot: after}, nil
+		case "set_value":
+			return &psResponse{OK: true, Snapshot: after}, nil
+		default:
+			return nil, fmt.Errorf("unexpected tool %q", request.Tool)
+		}
+	})
+	handshakeWindowsHost(t, server)
+	if _, rpcError := server.beginSession(map[string]any{"session": "s1"}); rpcError != nil {
+		t.Fatal(rpcError)
+	}
+	observed := server.observe(map[string]any{
+		"session": "s1",
+		"target": map[string]any{
+			"kind": "app",
+			"app":  windowsAppID(*windowsHostTestSnapshot("before")),
+		},
+	})
+	wire := observed["snapshot"].(map[string]any)
+	element := wire["elements"].([]map[string]any)[0]
+	result := server.dispatchElement(map[string]any{
+		"session":             "s1",
+		"snapshotId":          wire["snapshotId"],
+		"toolCallId":          "call-set",
+		"elementToken":        element["token"],
+		"expectElementDigest": element["digest"],
+		"action": map[string]any{
+			"kind":  "set_value",
+			"value": "updated",
+		},
+		"observeAfter": map[string]any{
+			"includeImage": false,
+			"settle":       "quiesce",
+		},
+	})
+	if result["effect"] != "confirmed" {
+		t.Fatalf("set_value was not confirmed: %#v", result)
+	}
+	verification := result["verification"].(map[string]any)
+	if verification["method"] != "value_readback" || verification["observedChange"] != true {
+		t.Fatalf("unexpected verification: %#v", verification)
+	}
+	settle := result["settle"].(map[string]any)
+	if settle["quiesced"] != true || settle["reason"] != "quiesced" {
+		t.Fatalf("unexpected settle: %#v", settle)
+	}
+	if getStateCalls != 2 {
+		t.Fatalf("get_app_state calls = %d, want initial observe plus one settle sample", getStateCalls)
+	}
+}
+
+func TestWindowsHostProtocolSecondaryActionUsesActionResult(t *testing.T) {
+	server := newTestWindowsHostServer(t, func(request psRequest) (*psResponse, error) {
+		switch request.Tool {
+		case "host_inventory":
+			return &psResponse{OK: true, Apps: []appSnapshot{*windowsHostTestSnapshot("before")}}, nil
+		case "get_app_state":
+			return &psResponse{OK: true, Snapshot: windowsHostTestSnapshot("before")}, nil
+		case "perform_secondary_action":
+			return &psResponse{OK: true, Snapshot: windowsHostTestSnapshot("after")}, nil
+		default:
+			return nil, fmt.Errorf("unexpected tool %q", request.Tool)
+		}
+	})
+	handshakeWindowsHost(t, server)
+	if _, rpcError := server.beginSession(map[string]any{"session": "s1"}); rpcError != nil {
+		t.Fatal(rpcError)
+	}
+	observed := server.observe(map[string]any{
+		"session": "s1",
+		"target": map[string]any{
+			"kind": "app",
+			"app":  windowsAppID(*windowsHostTestSnapshot("before")),
+		},
+	})
+	wire := observed["snapshot"].(map[string]any)
+	element := wire["elements"].([]map[string]any)[0]
+	result := server.dispatchElement(map[string]any{
+		"session":             "s1",
+		"snapshotId":          wire["snapshotId"],
+		"toolCallId":          "call-secondary",
+		"elementToken":        element["token"],
+		"expectElementDigest": element["digest"],
+		"action": map[string]any{
+			"kind":   "secondary_action",
+			"action": "press",
+		},
+	})
+	if result["effect"] != "confirmed" {
+		t.Fatalf("secondary action was not confirmed: %#v", result)
+	}
+	verification := result["verification"].(map[string]any)
+	if verification["method"] != "action_result" || verification["observedChange"] != false {
+		t.Fatalf("unexpected verification: %#v", verification)
+	}
+}
+
+func TestWindowsHostProtocolAppIDsAreWindowSpecific(t *testing.T) {
+	first := *windowsHostTestSnapshot("first")
+	second := *windowsHostTestSnapshot("second")
+	second.WindowID = 100
+	if windowsAppID(first) == windowsAppID(second) {
+		t.Fatalf("windows sharing a process must not share app ids: %q", windowsAppID(first))
+	}
+}
+
+func TestWindowsHostProtocolRejectsMissingExactWindow(t *testing.T) {
+	server := newTestWindowsHostServer(t, func(request psRequest) (*psResponse, error) {
+		if request.Tool != "host_inventory" {
+			return nil, fmt.Errorf("unexpected PowerShell request: %+v", request)
+		}
+		return &psResponse{OK: true, Apps: []appSnapshot{*windowsHostTestSnapshot("before")}}, nil
+	})
+	handshakeWindowsHost(t, server)
+	if _, rpcError := server.beginSession(map[string]any{"session": "s1"}); rpcError != nil {
+		t.Fatal(rpcError)
+	}
+	result := server.observe(map[string]any{
+		"session": "s1",
+		"target": map[string]any{
+			"kind":     "window",
+			"pid":      41,
+			"windowId": 100,
+		},
+	})
+	errorBody := result["error"].(map[string]any)
+	if errorBody["code"] != "window_gone" {
+		t.Fatalf("unexpected error: %#v", errorBody)
+	}
+}
+
+func TestWindowsHostProtocolMapsWindowGoneDuringDispatch(t *testing.T) {
+	server := newTestWindowsHostServer(t, func(request psRequest) (*psResponse, error) {
+		switch request.Tool {
+		case "host_inventory":
+			return &psResponse{OK: true, Apps: []appSnapshot{*windowsHostTestSnapshot("before")}}, nil
+		case "get_app_state":
+			return &psResponse{OK: true, Snapshot: windowsHostTestSnapshot("before")}, nil
+		case "click":
+			return &psResponse{
+				OK: false, ErrorCode: "window_gone", Error: "the bound window no longer exists",
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected PowerShell request: %+v", request)
+		}
+	})
+	handshakeWindowsHost(t, server)
+	if _, rpcError := server.beginSession(map[string]any{"session": "s1"}); rpcError != nil {
+		t.Fatal(rpcError)
+	}
+	observed := server.observe(map[string]any{
+		"session": "s1",
+		"target": map[string]any{
+			"kind": "app",
+			"app":  windowsAppID(*windowsHostTestSnapshot("before")),
+		},
+	})
+	wire := observed["snapshot"].(map[string]any)
+	element := wire["elements"].([]map[string]any)[0]
+	result := server.dispatchElement(map[string]any{
+		"session":             "s1",
+		"snapshotId":          wire["snapshotId"],
+		"toolCallId":          "call-window-gone",
+		"elementToken":        element["token"],
+		"expectElementDigest": element["digest"],
+		"action":              map[string]any{"kind": "click"},
+	})
+	errorBody := result["error"].(map[string]any)
+	if errorBody["code"] != "window_gone" {
+		t.Fatalf("unexpected error: %#v", errorBody)
+	}
+}
+
+func newTestWindowsHostServer(t *testing.T, run powerShellRunner) *windowsHostServer {
+	t.Helper()
+	server, err := newWindowsHostServer(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server
+}
+
+func handshakeWindowsHost(t *testing.T, server *windowsHostServer) {
+	t.Helper()
+	_, rpcError := server.hello(map[string]any{
+		"protocol": windowsHostProtocolVersion,
+		"imageDir": t.TempDir(),
+	})
+	if rpcError != nil {
+		t.Fatalf("hello failed: %+v", rpcError)
+	}
+}
+
+func windowsHostTestSnapshot(value string) *appSnapshot {
+	selected := false
+	return &appSnapshot{
+		App:         appDescriptor{Name: "notepad", BundleIdentifier: "notepad", PID: 41},
+		WindowID:    99,
+		WindowTitle: "Untitled",
+		WindowBounds: &frame{
+			X: 10, Y: 20, Width: 640, Height: 480,
+		},
+		Elements: []elementRecord{{
+			Index:       0,
+			ParentIndex: -1,
+			Depth:       0,
+			RuntimeID:   []int{1, 2, 3},
+			Name:        "Document",
+			ControlType: "ControlType.Document",
+			Value:       value,
+			Frame:       &frame{X: 0, Y: 0, Width: 640, Height: 480},
+			Actions:     []string{"Invoke", "SetValue"},
+			Enabled:     true,
+			Focused:     true,
+			Selected:    &selected,
+		}},
+	}
+}
+
 func TestWindowsRuntimeForegroundActionsRequireOptIn(t *testing.T) {
 	if !strings.Contains(windowsRuntimeScript, "OPEN_COMPUTER_USE_WINDOWS_ALLOW_APP_LAUNCH") {
 		t.Fatal("Windows app launch fallback must remain opt-in")
@@ -294,6 +792,18 @@ func TestWindowsRuntimeTreeBudgetDefaultsMatchMacOS(t *testing.T) {
 	}
 	if !strings.Contains(windowsRuntimeScript, "$script:nextIndex -ge $script:MaxTreeNodes -or $depth -gt $script:MaxTreeDepth") {
 		t.Fatal("Windows runtime should use shared tree budget constants while rendering")
+	}
+}
+
+func TestWindowsRuntimeNamesApplicationFrameWindowsFromUIA(t *testing.T) {
+	if !strings.Contains(windowsRuntimeScript, `$appName -ieq "ApplicationFrameHost"`) {
+		t.Fatal("Windows inventory should replace the generic UWP frame-host name")
+	}
+	if !strings.Contains(windowsRuntimeScript, `$appName = $window.Current.Name`) {
+		t.Fatal("Windows inventory should expose the user-visible UWP app name")
+	}
+	if !strings.Contains(windowsRuntimeScript, `$appName = $windowTitle`) {
+		t.Fatal("Windows observations should expose the user-visible UWP app name")
 	}
 }
 

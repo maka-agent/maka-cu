@@ -68,6 +68,8 @@ func (f frame) renderedLocalFrame() string {
 
 type elementRecord struct {
 	Index                int      `json:"index"`
+	ParentIndex          int      `json:"parentIndex"`
+	Depth                int      `json:"depth"`
 	RuntimeID            []int    `json:"runtimeId,omitempty"`
 	AutomationID         string   `json:"automationId,omitempty"`
 	Name                 string   `json:"name,omitempty"`
@@ -78,10 +80,14 @@ type elementRecord struct {
 	NativeWindowHandle   int64    `json:"nativeWindowHandle,omitempty"`
 	Frame                *frame   `json:"frame,omitempty"`
 	Actions              []string `json:"actions,omitempty"`
+	Enabled              bool     `json:"enabled"`
+	Focused              bool     `json:"focused"`
+	Selected             *bool    `json:"selected,omitempty"`
 }
 
 type appSnapshot struct {
 	App                 appDescriptor   `json:"app"`
+	WindowID            int64           `json:"windowId,omitempty"`
 	WindowTitle         string          `json:"windowTitle,omitempty"`
 	WindowBounds        *frame          `json:"windowBounds,omitempty"`
 	ScreenshotPNGBase64 string          `json:"screenshotPngBase64,omitempty"`
@@ -89,6 +95,7 @@ type appSnapshot struct {
 	FocusedSummary      string          `json:"focusedSummary,omitempty"`
 	SelectedText        string          `json:"selectedText,omitempty"`
 	Elements            []elementRecord `json:"elements,omitempty"`
+	TreeTruncated       bool            `json:"treeTruncated,omitempty"`
 }
 
 func (s *appSnapshot) renderedText() string {
@@ -132,28 +139,30 @@ func (s *appSnapshot) result() toolCallResult {
 }
 
 type psRequest struct {
-	Tool         string         `json:"tool"`
-	App          string         `json:"app,omitempty"`
-	Element      *elementRecord `json:"element,omitempty"`
-	X            *float64       `json:"x,omitempty"`
-	Y            *float64       `json:"y,omitempty"`
-	FromX        *float64       `json:"from_x,omitempty"`
-	FromY        *float64       `json:"from_y,omitempty"`
-	ToX          *float64       `json:"to_x,omitempty"`
-	ToY          *float64       `json:"to_y,omitempty"`
-	ClickCount   int            `json:"click_count,omitempty"`
-	MouseButton  string         `json:"mouse_button,omitempty"`
-	ClickMethod  string         `json:"click_method,omitempty"`
-	Action       string         `json:"action,omitempty"`
-	Direction    string         `json:"direction,omitempty"`
-	Pages        float64        `json:"pages,omitempty"`
-	Text         string         `json:"text,omitempty"`
-	Key          string         `json:"key,omitempty"`
-	Value        string         `json:"value,omitempty"`
-	WindowBounds *frame         `json:"windowBounds,omitempty"`
-	TextLimit    any            `json:"text_limit,omitempty"`
-	MaxTreeNodes int            `json:"max_tree_nodes,omitempty"`
-	MaxTreeDepth int            `json:"max_tree_depth,omitempty"`
+	Tool              string         `json:"tool"`
+	App               string         `json:"app,omitempty"`
+	WindowID          int64          `json:"windowId,omitempty"`
+	Element           *elementRecord `json:"element,omitempty"`
+	X                 *float64       `json:"x,omitempty"`
+	Y                 *float64       `json:"y,omitempty"`
+	FromX             *float64       `json:"from_x,omitempty"`
+	FromY             *float64       `json:"from_y,omitempty"`
+	ToX               *float64       `json:"to_x,omitempty"`
+	ToY               *float64       `json:"to_y,omitempty"`
+	ClickCount        int            `json:"click_count,omitempty"`
+	MouseButton       string         `json:"mouse_button,omitempty"`
+	ClickMethod       string         `json:"click_method,omitempty"`
+	Action            string         `json:"action,omitempty"`
+	Direction         string         `json:"direction,omitempty"`
+	Pages             float64        `json:"pages,omitempty"`
+	Text              string         `json:"text,omitempty"`
+	Key               string         `json:"key,omitempty"`
+	Value             string         `json:"value,omitempty"`
+	WindowBounds      *frame         `json:"windowBounds,omitempty"`
+	TextLimit         any            `json:"text_limit,omitempty"`
+	MaxTreeNodes      int            `json:"max_tree_nodes,omitempty"`
+	MaxTreeDepth      int            `json:"max_tree_depth,omitempty"`
+	IncludeScreenshot *bool          `json:"include_screenshot,omitempty"`
 }
 
 type textLimit struct {
@@ -169,10 +178,12 @@ func (limit textLimit) runtimeValue() any {
 }
 
 type psResponse struct {
-	OK       bool         `json:"ok"`
-	Text     string       `json:"text,omitempty"`
-	Error    string       `json:"error,omitempty"`
-	Snapshot *appSnapshot `json:"snapshot,omitempty"`
+	OK        bool          `json:"ok"`
+	Text      string        `json:"text,omitempty"`
+	Error     string        `json:"error,omitempty"`
+	ErrorCode string        `json:"errorCode,omitempty"`
+	Snapshot  *appSnapshot  `json:"snapshot,omitempty"`
+	Apps      []appSnapshot `json:"apps,omitempty"`
 }
 
 type service struct {
@@ -882,6 +893,8 @@ func runCLI(args []string, stdout io.Writer) error {
 		return nil
 	case "mcp":
 		return runMCP(os.Stdin, stdout)
+	case "host":
+		return runHostProtocol(os.Stdin, stdout, runPowerShell)
 	case "doctor":
 		fmt.Fprintln(stdout, "Windows runtime: UI Automation and Win32 window-message bridge are available when this process runs in the signed-in desktop session.")
 		return nil
