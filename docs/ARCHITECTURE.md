@@ -58,8 +58,8 @@
 
 - host protocol 自己实现 observe 与 dispatch：`observe` 产出结构化的 AX 树 + element token，可执行 mutation 通过 `dispatch.element` 或绑定已验证焦点的 `dispatch.key` 完成。生产动作面不接受坐标输入，也不把 semantic action 降级成 point event。它不复用 `ComputerUseService` 的 index 定址入口——把协议接到 index 上就等于把协议存在的理由接回来了。
 - mutation 消费 snapshot 的 dispatch authority，但 spent snapshot 的 revision 仍可作为下一次 post-action observation 的差分基线；expired/evicted snapshot 不参与。这样动作后的模型输入可以只写有效变化，又不放宽 single-use snapshot 合同。
-- `target.resolve` 按 window inventory 的前到后顺序为应用选择当前 sheet/窗口；后续 `observe` 严格绑定 app identity + PID + process generation + window ID。AppKit sheet 在 CGWindow 侧是独立窗口、在 AX 侧是主窗口的 `AXSheet` / `AXDrawer` child，匹配顺序固定为 direct AXWindow 后 child sheet。
-- CGWindow 已出现但对应 AXWindow/AXSheet 尚未发布时，会对同一 PID/window/frame 最多重读 250ms；window inventory 本身不存在目标时仍立即 `window_gone`，不会回退到别的窗口。
+- `target.resolve` 按 window inventory 的前到后顺序为应用选择当前 sheet/窗口；后续 `observe` 严格绑定 app identity + PID + process generation + window ID。AppKit sheet 在 CGWindow 侧是独立窗口、在 AX 侧是主窗口的 `AXSheet` / `AXDrawer` child；executor 通过 `_AXUIElementGetWindow` 将 direct AXWindow 与 child sheet 精确映射到获批的 `CGWindowID`，不再以 frame 猜测身份。
+- CGWindow 已出现但对应 AXWindow/AXSheet 尚未发布时，会对同一 PID/window ID/bounds 最多重读 250ms；window inventory 本身不存在目标、SPI 不可用、匹配不唯一或 bounds 已变化时都 fail closed，不会回退到别的窗口。
 - host protocol 会同时绑定宿主 app 与真实 input-owner 的 PID/start time。WKWebView/WebContent 通过动态解析 `_AXUIElementGetActualPid` 识别；冷启动时用 XNU resource + jetsam coalition 的唯一 WebContent 关系做 readiness gate，首轮没有 `AXWebArea` 时等待 250ms 后重读一次。
 - observation 会删除被唯一真实 WebContent 元素遮蔽的叶子 accessibility mirror；歧义或非叶子 mirror 保留。WebContent 左键点击使用 host window 的精确 `CGWindowID` 和单通道 private SkyLight 事件，WindowServer 完成 renderer hop，不再走会产生 `isTrusted=false` 的 AX/JavaScript mirror。
 - retained AX 引用失效时允许同一进程世代内的唯一 identity-preserving refetch；只有 renderer-owned live 引用可在仅发生 `frame` reflow 时进入同一恢复路径。原生 AX 的 frame 变化和其它 digest 字段变化仍立即 fail closed，missing 与 ambiguous 分别拒绝为原始 stale code / `element_changed`。

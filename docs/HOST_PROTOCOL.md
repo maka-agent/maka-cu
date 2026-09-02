@@ -559,10 +559,12 @@ post-check discards the snapshot and image.
 
 The frontmost inventory entry may be an AppKit sheet. `CGWindowList` reports a
 sheet as a window, while Accessibility exposes it as an `AXSheet`/`AXDrawer`
-child of the main `AXWindow`; the executor first matches ordinary AX windows by
-frame, then matches those child roles by the same frame. It does not query a
-fictional `AXSheets` attribute. Exact window targeting never falls back to the
-main window when the requested secondary or sheet window cannot be matched.
+child of the main `AXWindow`. The executor walks both ordinary AX windows and
+those child roles, then uses `_AXUIElementGetWindow` to require the exact
+`CGWindowID` plus the expected bounds. It does not query a fictional `AXSheets`
+attribute or fall back to frame-only matching. Exact window targeting never
+falls back to the main window when the requested secondary or sheet window
+cannot be matched uniquely.
 
 Omitted `maxElements` / `maxDepth` / `maxTextChars` mean the values in
 `limits`. A value above the limit is `-32602`, not a silent clamp.
@@ -798,10 +800,12 @@ fact `move_window` rests on. Measured across seventeen applications on this
 machine, `AXPosition` equalled `CGWindowListCopyWindowInfo`'s origin to the point
 on every one, including the four windows with a negative origin — iTerm2 at
 `(80, -1049)`, a Chrome window at `(-193, -1049)`, Terminal at `(775, -964)`,
-Music at `(277, -931)`. The executor was already relying on this without saying
-so: `HostAX.window(pid:windowId:bounds:)` matches AX windows against the window
-list's frame to within one point, because there is no public AX attribute
-carrying a `CGWindowID`.
+Music at `(277, -931)`. The executor uses that agreement as a consistency check,
+not as identity: `HostAX.window(pid:windowId:bounds:)` obtains the AX element's
+exact `CGWindowID` through `_AXUIElementGetWindow` and separately requires its
+bounds to match the window inventory. If the SPI is unavailable, the id is
+missing, the match is ambiguous, or the bounds changed, lookup fails closed
+rather than guessing by frame.
 
 `image.scale` is `image.widthPx / target.bounds.width`, computed by the executor
 from the image it actually captured — not from `NSScreen.backingScaleFactor`.
@@ -1022,6 +1026,19 @@ addresses `文件 > 导出为 PDF…` exactly as it addresses a button. There is
 target kind, no new dispatch kind and no new method: a menu item exposes
 `AXPress`, which normalises to `press`, which is what
 `{ "kind": "click", "button": "left" }` already requires.
+
+Menu bindings are application-level, not window-level. macOS attaches the menu
+bar to the application responder chain, so a menu item is validated against the
+snapshot's app identity, PID generation, input owner and element digest, but it
+is not required to descend from the snapshot window. Window-tree elements do
+have that additional requirement: immediately before an effect they must still
+belong to the exact `CGWindowID` frozen by the snapshot.
+Because menu effects have no authoritative window root, `settle: "quiesce"`
+does not run a window-tree settle for them; the response keeps the action's own
+verification and reports the settle as `not_requested`. A requested
+`observeAfter` may still return a fresh view of the original window when it
+exists, or a typed post-observation error without changing the delivered menu
+outcome.
 
 **Why this exists.** Before it, no observation this executor produced contained a
 single menu element — not a truncated one, not a filtered one, *none*. `observe`
@@ -1465,12 +1482,12 @@ one write per row, polling the window list at 5 ms:
 | Obsidian | 16 ms | 172 ms |
 
 Everything else in this executor reads the window server: `observe` resolves its
-target out of `CGWindowListCopyWindowInfo`, and matches the AX window against
-that frame to within one point because there is no public AX attribute carrying a
-`CGWindowID`. So an executor that returned the instant the write was
+target out of `CGWindowListCopyWindowInfo`, then requires both the exact
+`CGWindowID` from `_AXUIElementGetWindow` and matching bounds. So an executor
+that returned the instant the write was
 acknowledged would answer with a frame in which its own `observeAfter` cannot
 find the window — the list still reporting the old origin, the application
-already reporting the new one, no candidate within a point, and
+already reporting the new one, no candidate with the expected bounds, and
 `postObservationError: window_gone` for a window in plain sight. The host's next
 `observe` would race the same way.
 

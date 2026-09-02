@@ -17,4 +17,4 @@
 | 架构文档 | B | 顶层结构、fixture bridge、app 模式和验证路径已经落文档。 | 后续补 release artifact、code signing / notarization 和 host 集成方式。 |
 | 测试 | B | `swift test` 覆盖绑定/refetch/path/readback/doctor/stable revision diff；共享 CUA Lab 已验证 WebContent、slider、scroll、stale，以及 modal/secondary open-button-scroll-close 5 轮真机闭环且目标始终后台。 | 把共享矩阵收进可选 CI/live runner，并继续扩展跨应用 modal/window 样本。 |
 | 可观测性 | B | `doctor --json` 已覆盖协议/版本、TCC、锁屏、SkyLight、actual-PID SPI、coalition、签名/hardened runtime 与 readiness；另有 snapshot、smoke 和对比样本。 | 补统一日志级别、notarization/staple 诊断与 release artifact 自检。 |
-| 安全 | B | 已明确本地-only、权限边界和 fixture test bridge 的作用域，并将内置 denylist 收缩到密码管理器。 | 增加 session approval 和更清楚的敏感 app policy，避免策略长期硬编码在仓库里。 |
+| 安全 | B | 已明确本地-only、权限边界和 fixture test bridge 的作用域，并将内置 denylist 收缩到密码管理器；v3 snapshot/effect 通过精确 `CGWindowID`、应用身份与进程代际绑定获批目标。 | 增加 session approval 和更清楚的敏感 app policy，避免策略长期硬编码在仓库里。 |
