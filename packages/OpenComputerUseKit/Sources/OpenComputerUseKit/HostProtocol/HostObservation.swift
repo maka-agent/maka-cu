@@ -19,7 +19,7 @@ public struct HostObservedElement: Codable, Equatable, Sendable {
     /// a wire that merged them could not report `detail.changed: ["title"]`
     /// against anything the host had been shown.
     ///
-    /// It was missing from `maka.cu/2` until the menu bar needed it, and it was
+    /// It was missing from `maka.cu/3` until the menu bar needed it, and it was
     /// already a hole before that. §4.3 lists `title` among the digest inputs and
     /// §6.2 reports it in `detail.changed`, so the protocol could tell a host
     /// *the title changed* about a field it had never sent — the host's only
@@ -79,6 +79,7 @@ public struct HostDisplayInfo: Codable, Equatable, Sendable {
 
 public struct HostWindowTarget: Codable, Equatable, Sendable {
     public let pid: Int32
+    public let processGeneration: String
     public let windowId: UInt32
     /// §5.1 — the one namespace, spelled the same way `apps.list`, `window.list`
     /// and the `apps.launch` result spell it for the same process. There is no

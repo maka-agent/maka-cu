@@ -33,6 +33,11 @@ public protocol HostSystemEnvironment {
     func screenIsLocked() -> Bool
     func permissions() -> PermissionDiagnostics
     func runningApps() -> [HostRunningApp]
+    /// Bundle identifiers matching an installed application, without launching
+    /// it or changing foreground state.
+    func installedBundleIdentifiers(matching query: String) -> Result<[String], HostDomainError>
+    /// Stable process birth identity used to bind an approved running target.
+    func processStartTime(pid: pid_t) -> UInt64?
     /// The pid holding the foreground, or `nil` when nothing ordinary does.
     ///
     /// It is behind the seam because `apps.launch` reports `foregroundTaken` by
@@ -127,6 +132,20 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
                 running: !app.runningApplication.isTerminated
             )
         }
+    }
+
+    public func installedBundleIdentifiers(
+        matching query: String
+    ) -> Result<[String], HostDomainError> {
+        do {
+            return .success(try AppDiscovery.matchingInstalledBundleIdentifiers(query))
+        } catch {
+            return .failure(hostAppLaunchFailure(error))
+        }
+    }
+
+    public func processStartTime(pid: pid_t) -> UInt64? {
+        hostProcessStartTime(pid: pid)
     }
 
     public func frontmostApplicationPid() -> pid_t? {
@@ -345,14 +364,14 @@ public func hostAppLaunchFailure(_ error: Error) -> HostDomainError {
     }
 }
 
-// MARK: - Resolving `{ "kind": "app" }`
+// MARK: - Resolving a running app identity
 
 /// §5.1 / §5.2 — the executor resolves an `appId` by exact string match, against
 /// applications that are **already running**, and refuses everything else.
 ///
 /// Two rules are load-bearing and neither is defensive:
 ///
-/// - No launch. `observe` is a read. The previous implementation went through
+/// - No launch. `target.resolve` is a read. The previous implementation went through
 ///   `AppDiscovery.resolve`, which falls through to `NSWorkspace.openApplication`
 ///   with a configuration that activates, and then polls for five seconds — so
 ///   observing a not-running app started it and took the user's foreground, with

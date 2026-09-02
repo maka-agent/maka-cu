@@ -68,7 +68,7 @@ final class HostObserveLiveTests: XCTestCase {
             // has a ceiling of its own that would be mixed into the measurement.
             let started = Date()
             server.handle(line: #"""
-            {"jsonrpc":"2.0","id":\#(10 + offset),"method":"observe","params":{"session":"s1","target":{"kind":"window","pid":\#(window.pid),"windowId":\#(window.windowId)},"includeImage":false}}
+            {"jsonrpc":"2.0","id":\#(10 + offset),"method":"observe","params":{"session":"s1","target":{"kind":"window","appId":"\#(window.appId)","pid":\#(window.pid),"processGeneration":"\#(hostProcessGeneration(hostProcessStartTime(pid: window.pid) ?? 0))","windowId":\#(window.windowId)},"includeImage":false}}
             """#)
 
             // The wait is longer than the host's own deadline on purpose: an

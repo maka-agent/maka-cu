@@ -352,7 +352,7 @@ final class HostKeyDeliveryLiveTests: XCTestCase {
         window: HostWindowInfo
     ) throws -> [String: Any] {
         server.handle(line: #"""
-        {"jsonrpc":"2.0","id":\#(id),"method":"observe","params":{"session":"s1","target":{"kind":"window","pid":\#(window.pid),"windowId":\#(window.windowId)},"includeImage":false}}
+        {"jsonrpc":"2.0","id":\#(id),"method":"observe","params":{"session":"s1","target":{"kind":"window","appId":"\#(window.appId)","pid":\#(window.pid),"processGeneration":"\#(hostProcessGeneration(hostProcessStartTime(pid: window.pid) ?? 0))","windowId":\#(window.windowId)},"includeImage":false}}
         """#)
         let response = try XCTUnwrap(try inbox.next(timeout: 30)["result"] as? [String: Any])
         guard response["ok"] as? Bool == true else {

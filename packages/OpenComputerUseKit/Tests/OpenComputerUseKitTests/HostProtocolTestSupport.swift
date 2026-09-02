@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 @testable import OpenComputerUseKit
 
-// Shared doubles for the `maka.cu/2` conformance vectors. Everything here stands
+// Shared doubles for the `maka.cu/3` conformance vectors. Everything here stands
 // in for the live machine so the §4 binding rules can be asserted without a
 // desktop; nothing here fakes protocol logic.
 
@@ -386,6 +386,8 @@ struct FakeEnvironment: HostSystemEnvironment {
     var keyEvents = KeyEventLog()
     var focusRequests = FocusRequestLog()
     var launches = AppLaunchLog()
+    var installedBundleIds: [String] = []
+    var processStartTimes: [pid_t: UInt64] = [:]
 
     func screenIsLocked() -> Bool { locked }
 
@@ -397,6 +399,10 @@ struct FakeEnvironment: HostSystemEnvironment {
     }
 
     func runningApps() -> [HostRunningApp] { inventory.read() }
+    func installedBundleIdentifiers(
+        matching query: String
+    ) -> Result<[String], HostDomainError> { .success(installedBundleIds) }
+    func processStartTime(pid: pid_t) -> UInt64? { processStartTimes[pid] ?? UInt64(pid) }
     func frontmostApplicationPid() -> pid_t? { frontmost.read() }
     func restoreFrontmostApplication(pid: pid_t) -> Bool { frontmost.restore(pid) }
     func beginSyntheticTargetFocus(
@@ -681,6 +687,7 @@ func hostTestSnapshot(
         capturedAt: capturedAt,
         target: HostWindowTarget(
             pid: window.pid,
+            processGeneration: hostProcessGeneration(hostTestProcessStartTime),
             windowId: window.windowId,
             appId: window.appId,
             appName: window.appName,
@@ -706,6 +713,8 @@ func hostTestSnapshot(
         id: id,
         session: session,
         pid: window.pid,
+        appId: window.appId,
+        processGeneration: hostProcessGeneration(hostTestProcessStartTime),
         windowId: window.windowId,
         capturedAt: capturedAt,
         windowDigest: windowDigest,
@@ -747,6 +756,7 @@ func hostTestWalkedSnapshot(
         capturedAt: capturedAt,
         target: HostWindowTarget(
             pid: window.pid,
+            processGeneration: hostProcessGeneration(hostTestProcessStartTime),
             windowId: window.windowId,
             appId: window.appId,
             appName: window.appName,
@@ -772,6 +782,8 @@ func hostTestWalkedSnapshot(
         id: id,
         session: session,
         pid: window.pid,
+        appId: window.appId,
+        processGeneration: hostProcessGeneration(hostTestProcessStartTime),
         windowId: window.windowId,
         capturedAt: capturedAt,
         windowDigest: windowDigest,

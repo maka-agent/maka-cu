@@ -34,6 +34,8 @@ public final class HostSnapshot {
     public let id: String
     public let session: String
     public let pid: pid_t
+    public let appId: String
+    public let processGeneration: String
     public let windowId: CGWindowID
     public let capturedAt: Int64
     public let windowDigest: String
@@ -49,6 +51,8 @@ public final class HostSnapshot {
         id: String,
         session: String,
         pid: pid_t,
+        appId: String,
+        processGeneration: String,
         windowId: CGWindowID,
         capturedAt: Int64,
         windowDigest: String,
@@ -60,6 +64,8 @@ public final class HostSnapshot {
         self.id = id
         self.session = session
         self.pid = pid
+        self.appId = appId
+        self.processGeneration = processGeneration
         self.windowId = windowId
         self.capturedAt = capturedAt
         self.windowDigest = windowDigest
@@ -301,13 +307,17 @@ public final class HostSnapshotRegistry {
 
     func latestDifferenceBaseline(
         session: String,
+        appId: String,
         pid: pid_t,
+        processGeneration: String,
         windowId: CGWindowID
     ) -> HostSnapshot? {
         lock.lock()
         defer { lock.unlock() }
         return sessions[session]?.snapshots.last {
-            $0.pid == pid
+            $0.appId == appId
+                && $0.pid == pid
+                && $0.processGeneration == processGeneration
                 && $0.windowId == windowId
                 && $0.state != .expired
                 && $0.state != .evicted

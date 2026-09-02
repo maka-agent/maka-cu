@@ -870,8 +870,8 @@ enum HostAX {
         // role is `AXSheet`, and a drawer is the same shape. Alerts, save
         // panels, print panels and permission prompts are all sheets, so an
         // observer that reads only `AXWindows` goes blind exactly when the app
-        // has stopped to ask a question — and `{ "kind": "app" }` resolves to
-        // the frontmost window, which while a sheet is up is the sheet.
+        // has stopped to ask a question — and `target.resolve` chooses the
+        // frontmost window, which while a sheet is up is the sheet.
         //
         // There is no `AXSheets` attribute, which is the trap. AppleScript
         // offers `sheets of window` and that reads like one, but System Events

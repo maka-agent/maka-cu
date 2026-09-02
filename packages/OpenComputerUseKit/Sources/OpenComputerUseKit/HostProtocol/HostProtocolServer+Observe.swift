@@ -95,6 +95,38 @@ extension HostProtocolServer {
         return true
     }
 
+    private func validateRoot(
+        appId: String,
+        pid: pid_t,
+        processGeneration: String,
+        windowId: CGWindowID
+    ) -> Result<HostWindowInfo, HostDomainError> {
+        guard
+            let startTime = environment.processStartTime(pid: pid),
+            hostProcessGeneration(startTime) == processGeneration
+        else {
+            return .failure(HostDomainError(.processReplaced))
+        }
+        guard let window = environment.onScreenWindows().first(where: {
+            $0.pid == pid && $0.windowId == windowId
+        }) else {
+            return .failure(HostDomainError(.windowGone))
+        }
+        guard window.appId == appId else {
+            return .failure(HostDomainError(.windowChanged))
+        }
+        return .success(window)
+    }
+
+    private func validateRoot(_ snapshot: HostSnapshot) -> Result<HostWindowInfo, HostDomainError> {
+        validateRoot(
+            appId: snapshot.appId,
+            pid: snapshot.pid,
+            processGeneration: snapshot.processGeneration,
+            windowId: snapshot.windowId
+        )
+    }
+
     /// The one place a snapshot is produced. Both `observe` and every
     /// `observeAfter` go through it, so a post-dispatch frame is the same shape,
     /// under the same bounds, as one the host asked for directly.
@@ -116,34 +148,30 @@ extension HostProtocolServer {
             return .failure(HostDomainError(.permissionMissing, detail: .missingPermission(.accessibility)))
         }
 
-        let windows = environment.onScreenWindows()
-        let resolved: HostWindowInfo
+        let appId: String
+        let pid: pid_t
+        let processGeneration: String
+        let windowId: CGWindowID
         switch target {
-        case .window(let pid, let windowId):
-            guard let match = windows.first(where: { $0.pid == pid && $0.windowId == windowId }) else {
-                return .failure(HostDomainError(.windowGone))
-            }
-            resolved = match
-        case .app(let appId):
-            // §5.2 — the executor resolves `{ "kind": "app" }`, and it resolves it
-            // by exact `appId` against what is *already running*. `observe` is a
-            // read: it never launches and never activates.
-            let app: HostRunningApp
-            switch hostResolveAppTarget(appId: appId, in: environment.runningApps()) {
-            case .success(let match):
-                app = match
-            case .failure(let error):
-                return .failure(error)
-            }
-
-            // `{ "kind": "app" }` resolves to the app's frontmost usable window
-            // and is ambiguous by design; `{ "kind": "window" }` is exact. The
-            // window list is front-to-back, so the first match is the frontmost.
-            guard let match = windows.first(where: { $0.pid == app.pid && $0.layer == 0 }) else {
-                return .failure(HostDomainError(.windowGone))
-            }
-            resolved = match
+        case .window(let expectedAppId, let expectedPid, let expectedGeneration, let expectedWindowId):
+            appId = expectedAppId
+            pid = expectedPid
+            processGeneration = expectedGeneration
+            windowId = expectedWindowId
         }
+        let resolved: HostWindowInfo
+        switch validateRoot(
+            appId: appId,
+            pid: pid,
+            processGeneration: processGeneration,
+            windowId: windowId
+        ) {
+        case .success(let window):
+            resolved = window
+        case .failure(let error):
+            return .failure(error)
+        }
+        let windows = environment.onScreenWindows()
 
         var windowElement = environment.windowElement(
             pid: resolved.pid,
@@ -166,7 +194,7 @@ extension HostProtocolServer {
             return .failure(HostDomainError(.windowGone))
         }
 
-        guard let startTime = hostProcessStartTime(pid: resolved.pid) else {
+        guard let startTime = environment.processStartTime(pid: resolved.pid) else {
             return .failure(HostDomainError(.processReplaced))
         }
 
@@ -289,7 +317,9 @@ extension HostProtocolServer {
         let displays = HostWindowInventory.displays()
         let previousSnapshot = currentRegistry().latestDifferenceBaseline(
             session: session,
+            appId: resolved.appId,
             pid: resolved.pid,
+            processGeneration: hostProcessGeneration(startTime),
             windowId: resolved.windowId
         )
 
@@ -326,6 +356,7 @@ extension HostProtocolServer {
                 capturedAt: capturedAt,
                 target: HostWindowTarget(
                     pid: resolved.pid,
+                    processGeneration: hostProcessGeneration(startTime),
                     windowId: resolved.windowId,
                     appId: resolved.appId,
                     appName: resolved.appName,
@@ -358,12 +389,25 @@ extension HostProtocolServer {
             }
             return .failure(error)
         case .success(let fit):
+            if case .failure(let error) = validateRoot(
+                appId: appId,
+                pid: pid,
+                processGeneration: processGeneration,
+                windowId: windowId
+            ) {
+                if let path = image?.path {
+                    currentImageStore().delete(path: path)
+                }
+                return .failure(error)
+            }
             let (payload, walkResult, observationRevision) = fit.payload
             return .success(
                 HostSnapshot(
                     id: snapshotId,
                     session: session,
                     pid: resolved.pid,
+                    appId: resolved.appId,
+                    processGeneration: hostProcessGeneration(startTime),
                     windowId: resolved.windowId,
                     capturedAt: capturedAt,
                     windowDigest: payload.windowDigest,
@@ -486,11 +530,15 @@ extension HostProtocolServer {
             return
         }
 
-        let windows = environment.onScreenWindows()
-        guard let window = windows.first(where: { $0.pid == snapshot.pid && $0.windowId == snapshot.windowId }) else {
-            refuse(HostDomainError(.windowGone))
+        let window: HostWindowInfo
+        switch validateRoot(snapshot) {
+        case .success(let current):
+            window = current
+        case .failure(let error):
+            refuse(error)
             return
         }
+        let windows = environment.onScreenWindows()
 
         let probe = environment.bindingProbe(windowBounds: window.bounds)
         var effectiveBinding = binding
@@ -636,6 +684,10 @@ extension HostProtocolServer {
                 .filter { $0.pid == snapshot.pid }
                 .map(\.windowId)
         )
+        if case .failure(let error) = validateRoot(snapshot) {
+            refuse(error)
+            return
+        }
         cancellations.markDispatched(id: id)
         let attempted = performElementAction(
             params.action,
@@ -1327,6 +1379,33 @@ extension HostProtocolServer {
         let digestBefore = snapshot.windowDigest
         currentRegistry().spend(snapshot)
 
+        func emitRootReplacement(_ error: HostDomainError) {
+            let verdict = hostEffectNotChecked()
+            emit(
+                id: id,
+                payload: HostDispatchResult(
+                    toolCallId: toolCallId,
+                    outcome: .unknown,
+                    tier: path.tier ?? .ax,
+                    path: path,
+                    effect: verdict.effect,
+                    verification: verdict.verification,
+                    settle: HostSettleReport(
+                        waitedMs: 0,
+                        quiesced: false,
+                        reason: .notRequested
+                    ),
+                    snapshot: nil,
+                    postObservationError: HostDomainErrorPayload(error)
+                )
+            )
+        }
+
+        if case .failure(let error) = validateRoot(snapshot) {
+            emitRootReplacement(error)
+            return
+        }
+
         var settleReport = HostSettleReport(waitedMs: 0, quiesced: false, reason: .notRequested)
         var digestAfter: String?
 
@@ -1334,6 +1413,11 @@ extension HostProtocolServer {
             let settled = quiesce(snapshot: snapshot, window: window)
             settleReport = settled.report
             digestAfter = settled.digest
+        }
+
+        if case .failure(let error) = validateRoot(snapshot) {
+            emitRootReplacement(error)
+            return
         }
 
         let verdict = verificationIsTreeDelta
@@ -1351,7 +1435,12 @@ extension HostProtocolServer {
         if let observeAfter {
             switch buildSnapshot(
                 session: snapshot.session,
-                target: .window(pid: snapshot.pid, windowId: snapshot.windowId),
+                target: .window(
+                    appId: snapshot.appId,
+                    pid: snapshot.pid,
+                    processGeneration: snapshot.processGeneration,
+                    windowId: snapshot.windowId
+                ),
                 includeImage: observeAfter.includeImage,
                 menuScope: observeAfter.menu,
                 maxElements: limits.maxElements,
@@ -1398,7 +1487,20 @@ extension HostProtocolServer {
         return hostSettle(
             ceilingMs: limits.settleCeilingMs,
             pollMs: hostSettlePollMs,
-            sample: { hostRecomputeWindowDigest(snapshot: snapshot, window: window, probe: probe) }
+            sample: {
+                guard case .success = self.validateRoot(snapshot) else {
+                    return "root-invalid-before-read"
+                }
+                let digest = hostRecomputeWindowDigest(
+                    snapshot: snapshot,
+                    window: window,
+                    probe: probe
+                )
+                guard case .success = self.validateRoot(snapshot) else {
+                    return "root-invalid-after-read"
+                }
+                return digest
+            }
         )
     }
 }
@@ -1597,9 +1699,12 @@ extension HostProtocolServer {
             return
         }
 
-        let windows = environment.onScreenWindows()
-        guard let window = windows.first(where: { $0.pid == snapshot.pid && $0.windowId == snapshot.windowId }) else {
-            refuse(HostDomainError(.windowGone))
+        let window: HostWindowInfo
+        switch validateRoot(snapshot) {
+        case .success(let current):
+            window = current
+        case .failure(let error):
+            refuse(error)
             return
         }
 
@@ -1625,6 +1730,10 @@ extension HostProtocolServer {
 
         if (params.focusPolicy ?? .require) == .acquire,
            !(focused.map { CFEqual($0, element) } ?? false) {
+            if case .failure(let error) = validateRoot(snapshot) {
+                refuse(error)
+                return
+            }
             guard environment.setFocusedElement(element, pid: snapshot.pid) else {
                 // No fallback: an element that refused focus is not an element to
                 // post keys at and hope. §6.4 — the code is the same
@@ -1655,6 +1764,10 @@ extension HostProtocolServer {
             ? HostAX.stringLikeValue(element, kAXValueAttribute)
             : nil
         let settleMode = params.observeAfter?.settle ?? HostSettleMode.none
+        if case .failure(let error) = validateRoot(snapshot) {
+            refuse(error)
+            return
+        }
         cancellations.markDispatched(id: id)
 
         do {

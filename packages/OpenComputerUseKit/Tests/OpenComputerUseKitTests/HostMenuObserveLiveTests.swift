@@ -82,7 +82,7 @@ final class HostMenuObserveLiveTests: XCTestCase {
 
         let started = Date()
         server.handle(line: #"""
-        {"jsonrpc":"2.0","id":3,"method":"observe","params":{"session":"s1","target":{"kind":"window","pid":\#(window.pid),"windowId":\#(window.windowId)},"includeImage":false,"menu":{"scope":"all"}}}
+        {"jsonrpc":"2.0","id":3,"method":"observe","params":{"session":"s1","target":{"kind":"window","appId":"\#(window.appId)","pid":\#(window.pid),"processGeneration":"\#(hostProcessGeneration(hostProcessStartTime(pid: window.pid) ?? 0))","windowId":\#(window.windowId)},"includeImage":false,"menu":{"scope":"all"}}}
         """#)
         let observed = try XCTUnwrap(try inbox.next(timeout: 30)["result"] as? [String: Any])
         let observeMs = Date().timeIntervalSince(started) * 1000
@@ -213,6 +213,7 @@ final class HostMenuObserveLiveTests: XCTestCase {
             server: server,
             inbox: inbox,
             id: 4,
+            appId: window.appId,
             pid: window.pid,
             windowId: window.windowId,
             titles: basic,
@@ -222,6 +223,7 @@ final class HostMenuObserveLiveTests: XCTestCase {
             server: server,
             inbox: inbox,
             id: 6,
+            appId: window.appId,
             pid: window.pid,
             windowId: window.windowId,
             titles: scientific,
@@ -252,6 +254,7 @@ final class HostMenuObserveLiveTests: XCTestCase {
                 server: server,
                 inbox: inbox,
                 id: 8,
+                appId: window.appId,
                 pid: window.pid,
                 windowId: window.windowId,
                 titles: sizeAtStart == afterBasic ? basic : scientific,
@@ -327,7 +330,7 @@ final class HostMenuObserveLiveTests: XCTestCase {
         _ = try inbox.next()
 
         server.handle(line: #"""
-        {"jsonrpc":"2.0","id":3,"method":"observe","params":{"session":"s1","target":{"kind":"window","pid":\#(window.pid),"windowId":\#(window.windowId)},"includeImage":false}}
+        {"jsonrpc":"2.0","id":3,"method":"observe","params":{"session":"s1","target":{"kind":"window","appId":"\#(window.appId)","pid":\#(window.pid),"processGeneration":"\#(hostProcessGeneration(hostProcessStartTime(pid: window.pid) ?? 0))","windowId":\#(window.windowId)},"includeImage":false}}
         """#)
         let observed = try XCTUnwrap(try inbox.next(timeout: 30)["result"] as? [String: Any])
         let snapshot = try XCTUnwrap(observed["snapshot"] as? [String: Any])
@@ -369,13 +372,14 @@ final class HostMenuObserveLiveTests: XCTestCase {
         server: HostProtocolServer,
         inbox: ResponseInbox,
         id: Int,
+        appId: String,
         pid: pid_t,
         windowId: CGWindowID,
         titles: [String],
         size: () -> CGSize?
     ) throws -> CGSize {
         server.handle(line: #"""
-        {"jsonrpc":"2.0","id":\#(id),"method":"observe","params":{"session":"s1","target":{"kind":"window","pid":\#(pid),"windowId":\#(windowId)},"includeImage":false,"menu":{"scope":"all"}}}
+        {"jsonrpc":"2.0","id":\#(id),"method":"observe","params":{"session":"s1","target":{"kind":"window","appId":"\#(appId)","pid":\#(pid),"processGeneration":"\#(hostProcessGeneration(hostProcessStartTime(pid: pid) ?? 0))","windowId":\#(windowId)},"includeImage":false,"menu":{"scope":"all"}}}
         """#)
         let observed = try XCTUnwrap(try inbox.next(timeout: 30)["result"] as? [String: Any])
         let snapshot = try XCTUnwrap(observed["snapshot"] as? [String: Any])

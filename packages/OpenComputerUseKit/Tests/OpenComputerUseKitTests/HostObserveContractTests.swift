@@ -7,103 +7,6 @@ import XCTest
 final class HostObserveContractTests: XCTestCase {
     // MARK: - `observe` is a read (§5.2)
 
-    func testObserveResolvesAnAppFromWhatIsAlreadyRunningAndNeverLaunchesIt() throws {
-        // The executor used to resolve `{ "kind": "app" }` through
-        // `AppDiscovery.resolve`, which falls through to
-        // `NSWorkspace.openApplication` — with a configuration that activates —
-        // and then polls for five seconds. Observing something started it and
-        // took the user's foreground, with nothing on the wire saying so. The
-        // environment here cannot launch anything at all, and resolution answers
-        // from its inventory.
-        var environment = FakeEnvironment()
-        environment.apps = [
-            HostRunningApp(appId: hostTestAppId, pid: hostTestPid, name: "Notes", running: true),
-        ]
-        environment.windows = [hostTestWindow()]
-
-        let harness = ServerHarness(environment: environment)
-        try harness.begin()
-
-        harness.send(observe(app: hostTestAppId))
-        let resolved = try harness.awaitResult()
-        // Resolution succeeded: the refusal that follows is about the window's
-        // Accessibility element, which no fake can produce.
-        XCTAssertEqual(try errorCode(resolved), "window_gone")
-
-        harness.send(observe(app: "com.example.not-running"))
-        XCTAssertEqual(try errorCode(harness.awaitResult()), "app_not_found")
-    }
-
-    func testObserveWithADisplayNameIsAppNotFoundRatherThanAGuess() throws {
-        // Vector 32 — `appName` is untrusted, localised display text and two apps
-        // may share one, so it is never a key.
-        var environment = FakeEnvironment()
-        environment.apps = [
-            HostRunningApp(appId: hostTestAppId, pid: hostTestPid, name: "Notes", running: true),
-        ]
-        environment.windows = [hostTestWindow()]
-
-        let harness = ServerHarness(environment: environment)
-        try harness.begin()
-
-        harness.send(observe(app: "Notes"))
-        XCTAssertEqual(try errorCode(harness.awaitResult()), "app_not_found")
-
-        harness.send(observe(app: "COM.APPLE.NOTES"))
-        XCTAssertEqual(try errorCode(harness.awaitResult()), "app_not_found", "exact match, not case-folded")
-    }
-
-    func testAppTargetChoosesFrontmostSheetAndWindowTargetRemainsExact() throws {
-        let pid = getpid()
-        let appId = "pid:\(pid)"
-        let sheet = hostTestWindow(
-            windowId: 72,
-            pid: pid,
-            appId: appId,
-            bounds: CGRect(x: 100, y: 100, width: 360, height: 150),
-            title: "Sheet",
-            zIndex: 9
-        )
-        let main = hostTestWindow(
-            windowId: 71,
-            pid: pid,
-            appId: appId,
-            bounds: CGRect(x: 50, y: 50, width: 800, height: 600),
-            title: "Main",
-            zIndex: 3
-        )
-
-        var environment = FakeEnvironment()
-        environment.apps = [
-            HostRunningApp(appId: appId, pid: pid, name: "Fixture", running: true),
-        ]
-        environment.windows = [sheet, main]
-        environment.windowElement = hostTestElement(pid: pid)
-
-        let harness = ServerHarness(environment: environment)
-        try harness.begin()
-
-        harness.send(observe(app: appId))
-        let appSnapshot = try XCTUnwrap(
-            try harness.awaitResult()["snapshot"] as? [String: Any]
-        )
-        let appTarget = try XCTUnwrap(appSnapshot["target"] as? [String: Any])
-        XCTAssertEqual(appTarget["windowId"] as? UInt32, sheet.windowId)
-
-        harness.send(
-            """
-            {"jsonrpc":"2.0","id":22,"method":"observe","params":{\
-            "session":"s1","target":{"kind":"window","pid":\(pid),"windowId":\(main.windowId)},\
-            "includeImage":false}}
-            """
-        )
-        let exactSnapshot = try XCTUnwrap(
-            try harness.awaitResult()["snapshot"] as? [String: Any]
-        )
-        let exactTarget = try XCTUnwrap(exactSnapshot["target"] as? [String: Any])
-        XCTAssertEqual(exactTarget["windowId"] as? UInt32, main.windowId)
-    }
-
     func testWindowFrameMatchingFindsSheetCandidateWithoutChangingDirectPriority() {
         let target = CGRect(x: 100, y: 100, width: 360, height: 150)
         let direct = [
@@ -150,14 +53,14 @@ final class HostObserveContractTests: XCTestCase {
         let harness = ServerHarness(environment: environment)
         try harness.begin()
 
-        harness.send(observe(app: appId))
+        harness.send(observe(appId: appId, pid: pid, windowId: 81))
         let first = try XCTUnwrap(
             try harness.awaitResult()["snapshot"] as? [String: Any]
         )
         XCTAssertNil(first["difference"])
         let firstId = try XCTUnwrap(first["snapshotId"] as? String)
 
-        harness.send(observe(app: appId))
+        harness.send(observe(appId: appId, pid: pid, windowId: 81))
         let second = try XCTUnwrap(
             try harness.awaitResult()["snapshot"] as? [String: Any]
         )
@@ -184,7 +87,7 @@ final class HostObserveContractTests: XCTestCase {
 
         let harness = ServerHarness(environment: environment)
         try harness.begin()
-        harness.send(observe(app: appId))
+        harness.send(observe(appId: appId, pid: pid, windowId: 91))
 
         let snapshot = try XCTUnwrap(
             try harness.awaitResult()["snapshot"] as? [String: Any]
@@ -206,7 +109,7 @@ final class HostObserveContractTests: XCTestCase {
         let harness = ServerHarness(environment: environment)
         try harness.begin()
 
-        harness.send(observe(app: "com.example.absent"))
+        harness.send(observe(appId: "com.example.absent", pid: hostTestPid, windowId: 999))
         let result = try harness.awaitResult()
         XCTAssertEqual(result["ok"] as? Bool, false)
         XCTAssertNil(result["outcome"])
@@ -374,11 +277,13 @@ final class HostObserveContractTests: XCTestCase {
 
     private var nextId = 200
 
-    private func observe(app: String) -> String {
+    private func observe(appId: String, pid: pid_t, windowId: CGWindowID) -> String {
         nextId += 1
         return """
         {"jsonrpc":"2.0","id":\(nextId),"method":"observe","params":{"session":"s1",\
-        "target":{"kind":"app","app":"\(app)"},"includeImage":false}}
+        "target":{"kind":"window","appId":"\(appId)","pid":\(pid),\
+        "processGeneration":"\(hostProcessGeneration(UInt64(pid)))","windowId":\(windowId)},\
+        "includeImage":false}}
         """
     }
 

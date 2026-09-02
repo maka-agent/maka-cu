@@ -68,7 +68,14 @@ final class HostSettleLiveTests: XCTestCase {
             // capture has a ceiling of its own that would be mixed into it.
             guard case .success(let snapshot) = server.buildSnapshot(
                 session: "s1",
-                target: .window(pid: window.pid, windowId: window.windowId),
+                target: .window(
+                    appId: window.appId,
+                    pid: window.pid,
+                    processGeneration: hostProcessGeneration(
+                        hostProcessStartTime(pid: window.pid) ?? 0
+                    ),
+                    windowId: window.windowId
+                ),
                 includeImage: false,
                 menuScope: nil,
                 maxElements: limits.maxElements,

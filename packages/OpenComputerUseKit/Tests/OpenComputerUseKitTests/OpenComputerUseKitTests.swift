@@ -87,7 +87,7 @@ final class OpenComputerUseKitTests: XCTestCase {
             from: Data(encoded.utf8)
         )
         XCTAssertEqual(decoded, report)
-        XCTAssertTrue(encoded.contains(#""protocolVersion" : "maka.cu/2""#))
+        XCTAssertTrue(encoded.contains(#""protocolVersion" : "maka.cu/3""#))
     }
 
     func testDoctorTrustedWebReadinessRequiresEveryNativeFence() {

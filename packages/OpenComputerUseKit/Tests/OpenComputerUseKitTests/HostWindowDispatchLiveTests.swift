@@ -511,7 +511,7 @@ final class HostWindowDispatchLiveTests: XCTestCase {
         func observe(_ window: HostWindowInfo) throws -> LiveFrame {
             nextId += 1
             server.handle(line: #"""
-            {"jsonrpc":"2.0","id":\#(nextId),"method":"observe","params":{"session":"s1","target":{"kind":"window","pid":\#(window.pid),"windowId":\#(window.windowId)},"includeImage":false}}
+            {"jsonrpc":"2.0","id":\#(nextId),"method":"observe","params":{"session":"s1","target":{"kind":"window","appId":"\#(window.appId)","pid":\#(window.pid),"processGeneration":"\#(hostProcessGeneration(hostProcessStartTime(pid: window.pid) ?? 0))","windowId":\#(window.windowId)},"includeImage":false}}
             """#)
 
             let result = try XCTUnwrap(try inbox.next(timeout: 30)["result"] as? [String: Any])

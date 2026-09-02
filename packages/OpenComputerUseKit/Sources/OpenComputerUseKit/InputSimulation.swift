@@ -319,7 +319,7 @@ enum InputSimulation {
     /// The CLI surface's key press, which parses an xdotool-flavoured string and
     /// posts the event the key code alone produces.
     ///
-    /// **Not the `maka.cu/2` path.** `dispatch.key` goes through
+    /// **Not the `maka.cu/3` path.** `dispatch.key` goes through
     /// `pressKeyStroke` and the closed table above, because a key posted this
     /// way carries the keyboard layout's translation of the key code — which is
     /// the wrong character for 22 of the wire's 26 named keys — and does not
