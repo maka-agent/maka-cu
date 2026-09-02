@@ -1,4 +1,4 @@
-# maka-cu Host Protocol (`maka.cu/2`)
+# maka-cu Host Protocol (`maka.cu/3`)
 
 The wire contract between the Maka Electron host (TypeScript) and `maka-cu`, the
 native macOS executor (Swift). Both sides are ours. This protocol answers to
@@ -13,7 +13,7 @@ Two engineers who cannot talk to each other should be able to build the two ends
 from this document and have them interoperate. Where a rule exists because of a
 specific bug or measurement, the rule says so.
 
-### Why this is version 2
+### Why this is version 3
 
 `maka.cu/1` was built twice from this document, once in Swift and once in
 TypeScript, by engineers who could not talk to each other. The two ends did not
@@ -28,6 +28,12 @@ Each is closed below, and each closure names the defect that produced it. Five o
 them move the wire, so the version string moves with them: a `maka.cu/1` peer is
 not compatible and must fail the handshake rather than degrade (§2). There is no
 `maka.cu/1` peer worth interoperating with — no two of them agreed.
+
+Version 3 adds side-effect-free target resolution and binds every observation to
+the resolved app identity, PID, process generation, and window. The host can now
+obtain approval for one native target and prove that every later read or effect
+still addresses that exact target. Version 2 cannot express this proof and is
+therefore not compatible.
 
 ---
 
@@ -128,7 +134,7 @@ message-redaction pass to get wrong.
 ### 1.3 One way to write a hash
 
 Every hash on this wire is the string `"<algorithm>:<lowercase hex>"`. In
-`maka.cu/2` the algorithm is always `sha256`, so every hash begins `sha256:`.
+`maka.cu/3` the algorithm is always `sha256`, so every hash begins `sha256:`.
 
 This applies without exception to `element.digest`, `snapshot.windowDigest`,
 `image.sha256` — including the images in `screen.capture` (§6.6) and in the
@@ -164,7 +170,7 @@ executor is already correct; the host is the side that changes.
 {
   "jsonrpc": "2.0", "id": 1, "method": "host.hello",
   "params": {
-    "protocol": "maka.cu/2",
+    "protocol": "maka.cu/3",
     "host": { "name": "maka", "version": "0.9.3" },
     "hostPid": 8123,
     "imageDir": "/var/folders/…/maka-cu-images-8123",
@@ -191,7 +197,7 @@ executor is already correct; the host is the side that changes.
 ```json
 {
   "ok": true,
-  "protocol": "maka.cu/2",
+  "protocol": "maka.cu/3",
   "executor": { "name": "maka-cu", "version": "0.4.0", "commit": "1747868" },
   "pid": 8140,
   "capabilities": {
@@ -228,7 +234,7 @@ executor implements, it MUST answer
 ```json
 { "jsonrpc": "2.0", "id": 1,
   "error": { "code": -32000, "message": "protocol_version_mismatch",
-             "data": { "supported": ["maka.cu/2"] } } }
+             "data": { "supported": ["maka.cu/3"] } } }
 ```
 
 then flush stdout and exit with status `78` (`EX_CONFIG`). The host MUST classify
@@ -237,7 +243,7 @@ already treats `service_mismatch` as non-retryable
 (`cua-driver-service.ts:200-203`). Silent degradation to a subset is forbidden in
 both directions.
 
-`supported` lists `maka.cu/2` and nothing else. `maka.cu/1` is withdrawn, not
+`supported` lists `maka.cu/3` and nothing else. `maka.cu/1` is withdrawn, not
 deprecated: the parts of it that moved are exactly the parts the two `maka.cu/1`
 implementations disagreed about, so a peer still speaking it is a peer whose
 behaviour on those points is unknown. Accepting it back would reintroduce every
@@ -474,10 +480,9 @@ There is exactly one string that names an app on this wire, and it is called
   moved to the side that knows.
 - `apps.list`, `window.list`, `snapshot.target` and the `apps.launch` result all
   carry it, spelled the same way, for the same process.
-- `{ "kind": "app", "app": … }` (§5.2) takes an `appId` and nothing else. The
-  executor resolves it by exact string match against `appId`. It MUST NOT match
-  against `appName`, against `snapshot.target.title`, or against any prefix or
-  case-folded form of either.
+- `target.resolve` is the only operation that accepts a display name. It returns
+  a canonical `appId` and exact execution selector; later reads never resolve a
+  display name again.
 - `appName` is a display string. It is untrusted application content (§1.2), it
   is localised, two apps may share one, and it is never a key.
 - There is no `bundleId` field anywhere on this wire. It was a second spelling of
@@ -507,16 +512,25 @@ one namespace, the app *name*, in both places (`appIdForWindow` feeds both the
 better one to standardise on, because a display name is neither unique nor stable
 across locales.
 
-Which side changes: both. The executor adds `appId` to `window.list` and
-`snapshot.target` and resolves `{kind: "app"}` on it. The host stops matching on
-`appName`/`title` and passes `appId` through unaltered.
+### 5.1.1 `target.resolve`
 
-When the host is given both an app string and a window id, it resolves the window
-id — exact, numeric — and then requires that window's `appId` to equal the app
-string. Disagreement is `target_missing`, because no window satisfies the pair;
-honouring one input and discarding the other would be acting on a target the
-caller did not name. This is not the old over-strict rule, which required both to
-match when the caller had sent only one (§5.2).
+`target.resolve` is read-only. It MUST NOT launch or activate an application.
+
+```json
+{ "method": "target.resolve",
+  "params": { "target": {
+    "kind": "application", "app": "TextEdit", "intent": "operate"
+  } } }
+```
+
+`intent: "operate"` returns exactly one running window or `missing` / `ambiguous`.
+`intent: "launch"` returns exactly one installed bundle identifier without
+starting it. An exact window request is `{ "kind": "window", "windowId": 90210 }`.
+
+A resolved running target contains `appId`, `pid`, `processGeneration` and
+`windowId`. `processGeneration` is canonical `pst:<UInt64 decimal>` and is taken
+from the process start time. A resolved installed target contains only its bundle
+identifier as `appId`.
 
 ### 5.2 `observe`
 
@@ -524,7 +538,13 @@ match when the caller had sent only one (§5.2).
 { "method": "observe",
   "params": {
     "session": "s-01J…",
-    "target": { "kind": "window", "pid": 4711, "windowId": 90210 },
+    "target": {
+      "kind": "window",
+      "appId": "com.apple.Notes",
+      "pid": 4711,
+      "processGeneration": "pst:912345678",
+      "windowId": 90210
+    },
     "includeImage": true,
     "maxElements": 1500,
     "maxDepth": 64,
@@ -532,29 +552,17 @@ match when the caller had sent only one (§5.2).
   } }
 ```
 
-`target` is a **tagged union**, never a bag of optional fields:
+`target` is the exact running selector returned by `target.resolve`; `observe`
+does not perform target selection. Before reading, and again before returning,
+the executor requires the same app identity, PID generation and window. A failed
+post-check discards the snapshot and image.
 
-```json
-{ "kind": "app",    "app": "com.apple.Notes" }
-{ "kind": "window", "pid": 4711, "windowId": 90210 }
-```
-
-`app` is an `appId` (§5.1). `{ "kind": "app" }` resolves to the app's frontmost
-usable window and is ambiguous by design; `{ "kind": "window" }` is exact.
 The frontmost inventory entry may be an AppKit sheet. `CGWindowList` reports a
 sheet as a window, while Accessibility exposes it as an `AXSheet`/`AXDrawer`
 child of the main `AXWindow`; the executor first matches ordinary AX windows by
 frame, then matches those child roles by the same frame. It does not query a
 fictional `AXSheets` attribute. Exact window targeting never falls back to the
 main window when the requested secondary or sheet window cannot be matched.
-Optional `app` *and* optional `windowId` in one object is how a real-machine
-failure happened: the contract said "app **or** window\_id" while the harness
-required both to match, so a compliant model could not pass. A tagged union
-cannot express that disagreement.
-
-The **executor** resolves `{ "kind": "app" }`. It owns the window inventory and
-the z-order, and the host that tried to pre-resolve an app string against
-`window.list` is the host that invented title matching to make it work (§5.1).
 
 Omitted `maxElements` / `maxDepth` / `maxTextChars` mean the values in
 `limits`. A value above the limit is `-32602`, not a silent clamp.
@@ -670,7 +678,7 @@ the window list is read.
   other.
 
   They are not merged into one field because §4.3 digests them separately and
-  §6.2 reports `detail.changed: ["title"]`. `maka.cu/2` carried the digest input
+  §6.2 reports `detail.changed: ["title"]`. `maka.cu/3` carried the digest input
   without carrying the field, so the executor could tell a host *the title
   changed* about something it had never sent — and the host's only possible reply
   was to re-observe and compare nothing.
@@ -854,9 +862,9 @@ statements shipped.
 Ordered front-to-back. `zIndex` is monotonically decreasing along the array; the
 executor MUST NOT emit ties. `appId` is required and is the same namespace
 `apps.list` returns (§5.1); its absence here is what made an app string
-unresolvable against this list. The host uses this list for occlusion decisions
-and for joining a window id to its pid — not for resolving `{ "kind": "app" }`,
-which the executor does (§5.2).
+unresolvable against this list. The host uses this list for occlusion decisions;
+target selection belongs to the executor's side-effect-free `target.resolve`
+operation (§5.1.1).
 
 ### 5.5 `apps.list`
 
@@ -2438,14 +2446,14 @@ finer and remains safe because the host's queue is still upstream of it.
 
 ---
 
-## 10. Capture stream (reserved, not implemented in `maka.cu/2`)
+## 10. Capture stream (reserved, not implemented in `maka.cu/3`)
 
 Maka's picture-in-picture mirror repaints from the screenshot each action
 returns. A live mirror needs a stream, and this channel is request/response —
 so the stream is long-polling, the way Codex does it on its privileged channel
 (`AppStartCapture` then repeated `AppNextCaptureUpdate`).
 
-The method space is reserved now. In `maka.cu/2` all three return
+The method space is reserved now. In `maka.cu/3` all three return
 `{ "ok": false, "error": { "code": "not_implemented" } }` — a **domain** result,
 not `-32601`, so feature detection is a stable field read and the names can never
 be taken by something else.
@@ -2468,7 +2476,7 @@ be taken by something else.
 → { "ok": true, "released": { "frames": 30 } }
 ```
 
-What `maka.cu/2` already provides so this needs no protocol change:
+What `maka.cu/3` already provides so this needs no protocol change:
 
 - **Images are already references.** A 10 fps stream is path churn, not stdout
   churn.
@@ -2642,14 +2650,14 @@ Naming an app (§5.1):
 
 30. `apps.list`, `window.list`, `snapshot.target` and the `apps.launch` result
     report the same `appId` for the same process.
-31. `observe` with `{ "kind": "app", "app": "<appId of a bundled app>" }`
-    resolves; the reviewer's reproduction — an `{app, windowId}` observation of a
-    bundle-identified app — succeeds instead of being refused.
-32. `observe` with an `app` that is a display name, not an `appId`, is
-    `app_not_found`; the executor does not fall back to matching `appName` or
-    `title`.
-33. `apps.launch` by display name returns the resolved `appId`, and a subsequent
-    `observe` with that `appId` resolves the launched window.
+31. `target.resolve` with a bundled app's display name returns the canonical
+    bundle `appId`, PID, process generation, and window without launching or
+    activating anything.
+32. An ambiguous display name returns `ambiguous`; it does not pick a match by
+    title, prefix, locale, or inventory order.
+33. `apps.launch` receives the exact installed target returned by
+    `target.resolve`, and the subsequent `observe` receives the exact running
+    selector returned by a new resolution.
 
 Keys (§6.4):
 
