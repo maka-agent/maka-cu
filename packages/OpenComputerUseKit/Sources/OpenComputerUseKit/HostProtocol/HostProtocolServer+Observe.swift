@@ -1502,10 +1502,19 @@ extension HostProtocolServer {
         var settleReport = HostSettleReport(waitedMs: 0, quiesced: false, reason: .notRequested)
         var digestAfter: String?
 
-        if settleMode == .quiesce, let window {
-            let settled = quiesce(snapshot: snapshot, window: window)
-            settleReport = settled.report
-            digestAfter = settled.digest
+        if settleMode == .quiesce, !applicationLevel {
+            // A move or resize intentionally changes the window bounds. Settle
+            // the same frozen window identity at its current geometry rather
+            // than handing the pre-effect HostWindowInfo back to the probe.
+            switch validateRoot(snapshot, requireFrozenBounds: false) {
+            case .success(let currentWindow):
+                let settled = quiesce(snapshot: snapshot, window: currentWindow)
+                settleReport = settled.report
+                digestAfter = settled.digest
+            case .failure(let error):
+                emitRootReplacement(error)
+                return
+            }
         }
 
         if let error = rootFailure() {
@@ -1581,7 +1590,7 @@ extension HostProtocolServer {
             ceilingMs: limits.settleCeilingMs,
             pollMs: hostSettlePollMs,
             sample: {
-                guard case .success = self.validateRoot(snapshot) else {
+                guard case .success = self.validateRoot(snapshot, requireFrozenBounds: false) else {
                     return "root-invalid-before-read"
                 }
                 let digest = hostRecomputeWindowDigest(
@@ -1589,7 +1598,7 @@ extension HostProtocolServer {
                     window: window,
                     probe: probe
                 )
-                guard case .success = self.validateRoot(snapshot) else {
+                guard case .success = self.validateRoot(snapshot, requireFrozenBounds: false) else {
                     return "root-invalid-after-read"
                 }
                 return digest
