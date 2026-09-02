@@ -99,7 +99,8 @@ extension HostProtocolServer {
         appId: String,
         pid: pid_t,
         processGeneration: String,
-        windowId: CGWindowID
+        windowId: CGWindowID,
+        expectedBounds: CGRect? = nil
     ) -> Result<HostWindowInfo, HostDomainError> {
         guard
             let startTime = environment.processStartTime(pid: pid),
@@ -115,16 +116,38 @@ extension HostProtocolServer {
         guard window.appId == appId else {
             return .failure(HostDomainError(.windowChanged))
         }
+        if let expectedBounds, !hostWindowBoundsMatch(window.bounds, expectedBounds) {
+            return .failure(HostDomainError(.windowChanged))
+        }
         return .success(window)
     }
 
-    private func validateRoot(_ snapshot: HostSnapshot) -> Result<HostWindowInfo, HostDomainError> {
+    private func validateRoot(
+        _ snapshot: HostSnapshot,
+        requireFrozenBounds: Bool = true
+    ) -> Result<HostWindowInfo, HostDomainError> {
         validateRoot(
             appId: snapshot.appId,
             pid: snapshot.pid,
             processGeneration: snapshot.processGeneration,
-            windowId: snapshot.windowId
+            windowId: snapshot.windowId,
+            expectedBounds: requireFrozenBounds ? snapshot.windowBounds : nil
         )
+    }
+
+    private func validateApplicationRoot(_ snapshot: HostSnapshot) -> HostDomainError? {
+        guard
+            let startTime = environment.processStartTime(pid: snapshot.pid),
+            hostProcessGeneration(startTime) == snapshot.processGeneration
+        else {
+            return HostDomainError(.processReplaced)
+        }
+        guard let app = environment.runningApps().first(where: {
+            $0.pid == snapshot.pid && $0.running
+        }) else {
+            return HostDomainError(.processReplaced)
+        }
+        return app.appId == snapshot.appId ? nil : HostDomainError(.windowChanged)
     }
 
     /// The one place a snapshot is produced. Both `observe` and every
@@ -393,7 +416,8 @@ extension HostProtocolServer {
                 appId: appId,
                 pid: pid,
                 processGeneration: processGeneration,
-                windowId: windowId
+                windowId: windowId,
+                expectedBounds: resolved.bounds
             ) {
                 if let path = image?.path {
                     currentImageStore().delete(path: path)
@@ -409,6 +433,7 @@ extension HostProtocolServer {
                     appId: resolved.appId,
                     processGeneration: hostProcessGeneration(startTime),
                     windowId: resolved.windowId,
+                    windowBounds: resolved.bounds,
                     capturedAt: capturedAt,
                     windowDigest: payload.windowDigest,
                     payload: payload,
@@ -530,17 +555,28 @@ extension HostProtocolServer {
             return
         }
 
-        let window: HostWindowInfo
-        switch validateRoot(snapshot) {
-        case .success(let current):
-            window = current
-        case .failure(let error):
-            refuse(error)
-            return
+        let window: HostWindowInfo?
+        if binding.isMenu {
+            if let error = validateApplicationRoot(snapshot) {
+                refuse(error)
+                return
+            }
+            window = nil
+        } else {
+            switch validateRoot(snapshot) {
+            case .success(let current):
+                window = current
+            case .failure(let error):
+                refuse(error)
+                return
+            }
         }
         let windows = environment.onScreenWindows()
 
-        let probe = environment.bindingProbe(windowBounds: window.bounds)
+        let probe = environment.bindingProbe(
+            windowId: snapshot.windowId,
+            windowBounds: window?.bounds ?? snapshot.windowBounds
+        )
         var effectiveBinding = binding
         var promotedToWebContent = false
         if let failure = hostVerifyBinding(binding, probe: probe) {
@@ -623,7 +659,7 @@ extension HostProtocolServer {
 
         // §6.1 `strictness: "window"` — the only defence against recycled row
         // views, at the cost of refusing on any change anywhere in the window.
-        if params.strictness == .window {
+        if params.strictness == .window, !binding.isMenu, let window {
             let current = hostRecomputeWindowDigest(snapshot: snapshot, window: window, probe: probe)
             guard current == snapshot.windowDigest else {
                 refuse(HostDomainError(.windowChanged))
@@ -638,7 +674,9 @@ extension HostProtocolServer {
         // Applying the check here would also refuse window management on every
         // application `apps.launch` started, because those begin at the bottom of
         // the z-order — the defect §6.1 already had to fix once for `same_app`.
-        if !params.action.addressesTheWindowItself, let frame = effectiveBinding.observed.frame?.cgRect {
+        if !params.action.addressesTheWindowItself,
+           let window,
+           let frame = effectiveBinding.observed.frame?.cgRect {
             let center = CGPoint(
                 x: window.bounds.minX + frame.midX,
                 y: window.bounds.minY + frame.midY
@@ -677,6 +715,13 @@ extension HostProtocolServer {
             Thread.sleep(forTimeInterval: 0.2)
         }
 
+        // The retained AX reference may be reparented after the earlier probe.
+        // Re-check the exact target immediately before the first effect.
+        if let failure = hostVerifyBinding(effectiveBinding, probe: probe) {
+            refuse(failure)
+            return
+        }
+
         let settleMode = params.observeAfter?.settle ?? HostSettleMode.none
         let frontmostBefore = environment.frontmostApplicationPid()
         let windowIdsBefore = Set(
@@ -684,7 +729,12 @@ extension HostProtocolServer {
                 .filter { $0.pid == snapshot.pid }
                 .map(\.windowId)
         )
-        if case .failure(let error) = validateRoot(snapshot) {
+        if binding.isMenu {
+            if let error = validateApplicationRoot(snapshot) {
+                refuse(error)
+                return
+            }
+        } else if case .failure(let error) = validateRoot(snapshot) {
             refuse(error)
             return
         }
@@ -742,6 +792,7 @@ extension HostProtocolServer {
             fallbackVerdict: performed.verdict,
             settleMode: settleMode,
             observeAfter: params.observeAfter,
+            applicationLevel: binding.isMenu,
             window: window
         )
     }
@@ -758,12 +809,13 @@ extension HostProtocolServer {
         _ action: HostElementAction,
         on element: AXUIElement,
         binding: HostElementBinding,
-        window: HostWindowInfo,
+        window: HostWindowInfo?,
         settle: HostSettleMode
     ) -> PerformedAction {
         switch action {
         case .click(.left, let count) where binding.dispatchPid != binding.pid:
-            guard (1...2).contains(count),
+            guard let window,
+                  (1...2).contains(count),
                   let frame = binding.observed.frame?.cgRect
             else {
                 return refused(.unsupportedAction)
@@ -806,6 +858,18 @@ extension HostProtocolServer {
                 // a coordinate click it did not ask for.
                 return refused(.elementNotActionable)
             }
+            if binding.isMenu {
+                return performAXAction(
+                    required,
+                    on: element,
+                    binding: binding,
+                    repeatCount: count,
+                    settle: settle
+                )
+            }
+            guard let window else {
+                return refused(.windowGone)
+            }
             return performAXActionWithSyntheticFocus(
                 required,
                 on: element,
@@ -818,6 +882,18 @@ extension HostProtocolServer {
         case .secondaryAction(let name):
             // §6.5 — `secondary_action` gets `action_result` only. There is
             // nothing generic to read back.
+            if binding.isMenu {
+                return performAXAction(
+                    name,
+                    on: element,
+                    binding: binding,
+                    repeatCount: 1,
+                    settle: .none
+                )
+            }
+            guard let window else {
+                return refused(.windowGone)
+            }
             return performAXActionWithSyntheticFocus(
                 name,
                 on: element,
@@ -868,7 +944,7 @@ extension HostProtocolServer {
                 )
             }
 
-            guard let frame = binding.observed.frame?.cgRect else {
+            guard let window, let frame = binding.observed.frame?.cgRect else {
                 return refused(.elementNotActionable)
             }
             let point = CGPoint(
@@ -992,6 +1068,9 @@ extension HostProtocolServer {
             )
 
         case .moveWindow, .resizeWindow, .minimizeWindow:
+            guard let window else {
+                return refused(.windowGone)
+            }
             return performWindowAction(action, on: element, binding: binding, window: window)
         }
     }
@@ -1374,7 +1453,8 @@ extension HostProtocolServer {
         fallbackVerdict: HostEffectVerdict,
         settleMode: HostSettleMode,
         observeAfter: HostObserveAfter?,
-        window: HostWindowInfo
+        applicationLevel: Bool,
+        window: HostWindowInfo?
     ) {
         let digestBefore = snapshot.windowDigest
         currentRegistry().spend(snapshot)
@@ -1401,7 +1481,20 @@ extension HostProtocolServer {
             )
         }
 
-        if case .failure(let error) = validateRoot(snapshot) {
+        func rootFailure() -> HostDomainError? {
+            if applicationLevel {
+                return validateApplicationRoot(snapshot)
+            }
+            guard window != nil else {
+                return HostDomainError(.windowGone)
+            }
+            if case .failure(let error) = validateRoot(snapshot, requireFrozenBounds: false) {
+                return error
+            }
+            return nil
+        }
+
+        if let error = rootFailure() {
             emitRootReplacement(error)
             return
         }
@@ -1409,13 +1502,13 @@ extension HostProtocolServer {
         var settleReport = HostSettleReport(waitedMs: 0, quiesced: false, reason: .notRequested)
         var digestAfter: String?
 
-        if settleMode == .quiesce {
+        if settleMode == .quiesce, let window {
             let settled = quiesce(snapshot: snapshot, window: window)
             settleReport = settled.report
             digestAfter = settled.digest
         }
 
-        if case .failure(let error) = validateRoot(snapshot) {
+        if let error = rootFailure() {
             emitRootReplacement(error)
             return
         }
@@ -1483,7 +1576,7 @@ extension HostProtocolServer {
         snapshot: HostSnapshot,
         window: HostWindowInfo
     ) -> (report: HostSettleReport, digest: String) {
-        let probe = environment.bindingProbe(windowBounds: window.bounds)
+        let probe = environment.bindingProbe(windowId: snapshot.windowId, windowBounds: window.bounds)
         return hostSettle(
             ceilingMs: limits.settleCeilingMs,
             pollMs: hostSettlePollMs,
@@ -1708,7 +1801,11 @@ extension HostProtocolServer {
             return
         }
 
-        if let failure = hostVerifyBinding(binding, probe: environment.bindingProbe(windowBounds: window.bounds)) {
+        let probe = environment.bindingProbe(windowId: snapshot.windowId, windowBounds: window.bounds)
+        if let failure = hostVerifyBinding(
+            binding,
+            probe: probe
+        ) {
             refuse(failure)
             return
         }
@@ -1768,6 +1865,10 @@ extension HostProtocolServer {
             refuse(error)
             return
         }
+        if let failure = hostVerifyBinding(binding, probe: probe) {
+            refuse(failure)
+            return
+        }
         cancellations.markDispatched(id: id)
 
         do {
@@ -1821,6 +1922,7 @@ extension HostProtocolServer {
             fallbackVerdict: verdict,
             settleMode: settleMode,
             observeAfter: params.observeAfter,
+            applicationLevel: false,
             window: window
         )
     }

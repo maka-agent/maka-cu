@@ -102,6 +102,46 @@ final class HostDispatchTests: XCTestCase {
         )
     }
 
+    func testElementReparentedToAnotherWindowIsRefusedBeforeAnyEffect() throws {
+        var environment = FakeEnvironment()
+        var probe = FakeBindingProbe()
+        probe.belongsToTarget = false
+        environment.probe = probe
+        environment.windows = [hostTestWindow()]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(registry: harness.server.currentRegistry(), session: "s1")
+        harness.install(snapshot)
+
+        harness.send(dispatchElement(snapshot: snapshot))
+
+        XCTAssertEqual(try errorCode(harness.awaitResult()), "window_changed")
+        XCTAssertTrue(harness.environment.pointEvents.posted.isEmpty)
+    }
+
+    func testMenuBindingUsesApplicationIdentityWhenItsSnapshotWindowIsGone() throws {
+        var environment = FakeEnvironment()
+        environment.apps = [
+            HostRunningApp(appId: hostTestAppId, pid: hostTestPid, name: "Notes", running: true),
+        ]
+        environment.windows = []
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            enabled: false,
+            isMenu: true
+        )
+        harness.install(snapshot)
+
+        harness.send(dispatchElement(snapshot: snapshot))
+
+        XCTAssertEqual(try errorCode(harness.awaitResult()), "element_disabled")
+    }
+
     // MARK: - Element binding (§4.3, §6.2)
 
     func testTheEchoedDigestSeparatesAnUnknownTokenFromAMismatchedEcho() throws {

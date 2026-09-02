@@ -9,6 +9,11 @@ private typealias HostAXGetActualPid = @convention(c) (
     UnsafeMutablePointer<pid_t>
 ) -> AXError
 
+private typealias HostAXGetWindowId = @convention(c) (
+    AXUIElement,
+    UnsafeMutablePointer<CGWindowID>
+) -> AXError
+
 private let hostAXGetActualPid: HostAXGetActualPid? = {
     guard let handle = dlopen(
         "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices",
@@ -22,8 +27,36 @@ private let hostAXGetActualPid: HostAXGetActualPid? = {
     return unsafeBitCast(symbol, to: HostAXGetActualPid.self)
 }()
 
+private let hostAXGetWindowId: HostAXGetWindowId? = {
+    guard let handle = dlopen(
+        "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices",
+        RTLD_LAZY | RTLD_LOCAL
+    ) else {
+        return nil
+    }
+    guard let symbol = dlsym(handle, "_AXUIElementGetWindow") else {
+        return nil
+    }
+    return unsafeBitCast(symbol, to: HostAXGetWindowId.self)
+}()
+
 public func hostActualPidSPIAvailable() -> Bool {
     hostAXGetActualPid != nil
+}
+
+public func hostWindowIdSPIAvailable() -> Bool {
+    hostAXGetWindowId != nil
+}
+
+public func hostWindowId(of element: AXUIElement) -> CGWindowID? {
+    guard let hostAXGetWindowId else {
+        return nil
+    }
+    var windowId = CGWindowID(0)
+    guard hostAXGetWindowId(element, &windowId) == .success, windowId != 0 else {
+        return nil
+    }
+    return windowId
 }
 
 /// Everything in this file talks to macOS. It is kept apart from the protocol
@@ -64,19 +97,23 @@ public struct HostWindowInfo: Equatable, Sendable {
     public let displayId: String?
 }
 
-func hostFirstWindowCandidate<Element>(
-    _ candidates: [(element: Element, frame: CGRect?)],
-    matching bounds: CGRect
+func hostWindowBoundsMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+    abs(lhs.origin.x - rhs.origin.x) < 1
+        && abs(lhs.origin.y - rhs.origin.y) < 1
+        && abs(lhs.width - rhs.width) < 1
+        && abs(lhs.height - rhs.height) < 1
+}
+
+func hostUniqueWindowCandidate<Element>(
+    _ candidates: [(element: Element, windowId: CGWindowID?, frame: CGRect?)],
+    matching windowId: CGWindowID,
+    bounds: CGRect
 ) -> Element? {
-    candidates.first { candidate in
-        guard let frame = candidate.frame else {
-            return false
-        }
-        return abs(frame.origin.x - bounds.origin.x) < 1
-            && abs(frame.origin.y - bounds.origin.y) < 1
-            && abs(frame.width - bounds.width) < 1
-            && abs(frame.height - bounds.height) < 1
-    }?.element
+    let matches = candidates.filter { candidate in
+        candidate.windowId == windowId
+            && candidate.frame.map { hostWindowBoundsMatch($0, bounds) } == true
+    }
+    return matches.count == 1 ? matches[0].element : nil
 }
 
 public enum HostWindowInventory {
@@ -854,17 +891,6 @@ enum HostAX {
             windows = array(application, kAXWindowsAttribute)
         }
 
-        // There is no public AX attribute carrying a CGWindowID, so the window is
-        // matched by its frame against the one the window list reported. Bounds
-        // are compared at whole-point resolution because AX and CGWindowList
-        // disagree in the sub-pixel digits on scaled displays.
-        if let matched = hostFirstWindowCandidate(
-            windows.map { ($0, frame($0)) },
-            matching: bounds
-        ) {
-            return matched
-        }
-
         // A sheet is a window to CGWindowList and a child to accessibility. It
         // is never in `AXWindows` — it is a child of its parent window whose
         // role is `AXSheet`, and a drawer is the same shape. Alerts, save
@@ -886,15 +912,35 @@ enum HostAX {
                 sheetLikeRoles.contains(string($0, kAXRoleAttribute) ?? "")
             }
         }
-        return hostFirstWindowCandidate(
-            sheets.map { ($0, frame($0)) },
-            matching: bounds
+        return hostUniqueWindowCandidate(
+            (windows + sheets).map { ($0, hostWindowId(of: $0), frame($0)) },
+            matching: windowId,
+            bounds: bounds
         )
     }
 
     /// Roles that CGWindowList reports as a window of their own while
     /// accessibility reports them as a child of one.
     static let sheetLikeRoles: Set<String> = ["AXSheet", "AXDrawer"]
+
+    static func containingWindow(of element: AXUIElement) -> AXUIElement? {
+        var current: AXUIElement? = element
+        var visited = Set<HostAXElementKey>()
+        var examined = 0
+        while let candidate = current, examined < 128 {
+            let key = HostAXElementKey(candidate)
+            guard visited.insert(key).inserted else {
+                return nil
+            }
+            examined += 1
+            let role = string(candidate, kAXRoleAttribute) ?? ""
+            if role == kAXWindowRole as String || sheetLikeRoles.contains(role) {
+                return candidate
+            }
+            current = parent(of: candidate)
+        }
+        return nil
+    }
 
     static func focusedElement(pid: pid_t) -> AXUIElement? {
         let application = AXUIElementCreateApplication(pid)
@@ -1079,10 +1125,12 @@ enum HostAX {
 /// copy of that list — and the two copies have drifted twice now, each time
 /// refusing dispatches against elements nothing had touched.
 final class HostAXBindingProbe: HostElementBindingProbe {
+    let windowId: CGWindowID
     let windowBounds: CGRect
     private let limits = HostLimits()
 
-    init(windowBounds: CGRect) {
+    init(windowId: CGWindowID, windowBounds: CGRect) {
+        self.windowId = windowId
         self.windowBounds = windowBounds
     }
 
@@ -1102,6 +1150,20 @@ final class HostAXBindingProbe: HostElementBindingProbe {
             return nil
         }
         return HostAX.actualPid(of: element)
+    }
+
+    func belongsToBoundTarget(_ binding: HostElementBinding) -> Bool {
+        if binding.isMenu {
+            return true
+        }
+        guard
+            let element = binding.element,
+            let window = HostAX.containingWindow(of: element),
+            hostWindowId(of: window) == windowId
+        else {
+            return false
+        }
+        return true
     }
 
     func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput? {
@@ -1185,7 +1247,7 @@ final class HostAXBindingProbe: HostElementBindingProbe {
                 dropsAppleMenu: true
             )
         } else {
-            guard let window = HostAX.window(pid: binding.pid, windowId: 0, bounds: windowBounds) else {
+            guard let window = HostAX.window(pid: binding.pid, windowId: windowId, bounds: windowBounds) else {
                 return []
             }
             root = HostAXNode(

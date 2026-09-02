@@ -205,6 +205,9 @@ final class HostProtocolTests: XCTestCase {
 
         probe = FakeBindingProbe()
         XCTAssertNil(hostVerifyBinding(binding, probe: probe))
+
+        probe.belongsToTarget = false
+        XCTAssertEqual(hostVerifyBinding(binding, probe: probe)?.code, .windowChanged)
     }
 
     func testWindowDigestChangesWhenAnUnrelatedElementChanges() {

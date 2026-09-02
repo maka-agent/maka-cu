@@ -77,6 +77,7 @@ struct FakeBindingProbe: HostElementBindingProbe {
     var startTime: UInt64? = hostTestProcessStartTime
     var startTimes: [pid_t: UInt64] = [:]
     var actualPidOverride: pid_t?
+    var belongsToTarget = true
     var override: HostElementDigestInput?
     var refetch: HostBindingRefetchResult = .missing
     var webContentEquivalent: HostElementBinding?
@@ -90,6 +91,7 @@ struct FakeBindingProbe: HostElementBindingProbe {
     func actualPid(_ binding: HostElementBinding) -> pid_t? {
         actualPidOverride ?? binding.dispatchPid
     }
+    func belongsToBoundTarget(_ binding: HostElementBinding) -> Bool { belongsToTarget }
     func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput? {
         override ?? binding.digestInput
     }
@@ -423,7 +425,7 @@ struct FakeEnvironment: HostSystemEnvironment {
     func menuBarNode(pid: pid_t) -> HostAccessibilityNode? { menuBar }
     func focusedElement(pid: pid_t) -> AXUIElement? { focusRequests.currentFocus ?? focused }
     func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool { focusRequests.record(element) }
-    func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe { probe }
+    func bindingProbe(windowId: CGWindowID, windowBounds: CGRect) -> HostElementBindingProbe { probe }
 
     func postPointEvent(
         _ action: HostPointAction,
@@ -608,6 +610,7 @@ func hostTestBinding(
     frame: HostRect? = nil,
     element: AXUIElement? = nil,
     actions: [HostElementActionName] = [.press],
+    isMenu: Bool = false,
     dispatchPid: pid_t = hostTestPid,
     dispatchProcessStartTime: UInt64 = hostTestProcessStartTime
 ) -> HostElementBinding {
@@ -640,7 +643,8 @@ func hostTestBinding(
             actions: actions,
             digest: hostElementDigest(digestInput),
             truncated: []
-        )
+        ),
+        isMenu: isMenu
     )
 }
 
@@ -656,6 +660,7 @@ func hostTestSnapshot(
     elementFrame: HostRect? = nil,
     element: AXUIElement? = nil,
     elementActions: [HostElementActionName] = [.press],
+    isMenu: Bool = false,
     dispatchPid: pid_t? = nil,
     dispatchProcessStartTime: UInt64? = nil
 ) -> HostSnapshot {
@@ -671,6 +676,7 @@ func hostTestSnapshot(
         frame: elementFrame,
         element: element,
         actions: elementActions,
+        isMenu: isMenu,
         dispatchPid: dispatchPid ?? hostTestPid,
         dispatchProcessStartTime:
             dispatchProcessStartTime ?? hostTestProcessStartTime
@@ -716,6 +722,7 @@ func hostTestSnapshot(
         appId: window.appId,
         processGeneration: hostProcessGeneration(hostTestProcessStartTime),
         windowId: window.windowId,
+        windowBounds: window.bounds,
         capturedAt: capturedAt,
         windowDigest: windowDigest,
         payload: payload,
@@ -785,6 +792,7 @@ func hostTestWalkedSnapshot(
         appId: window.appId,
         processGeneration: hostProcessGeneration(hostTestProcessStartTime),
         windowId: window.windowId,
+        windowBounds: window.bounds,
         capturedAt: capturedAt,
         windowDigest: windowDigest,
         payload: payload,

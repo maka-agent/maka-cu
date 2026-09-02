@@ -7,27 +7,36 @@ import XCTest
 final class HostObserveContractTests: XCTestCase {
     // MARK: - `observe` is a read (§5.2)
 
-    func testWindowFrameMatchingFindsSheetCandidateWithoutChangingDirectPriority() {
+    func testWindowIdentitySelectsOnlyOneExactWindowIdAndMatchingFrame() {
         let target = CGRect(x: 100, y: 100, width: 360, height: 150)
-        let direct = [
-            (element: "main", frame: CGRect(x: 50, y: 50, width: 800, height: 600)),
-        ]
-        let sheets = [
-            (element: "sheet", frame: CGRect(x: 100.4, y: 99.6, width: 360, height: 150)),
-        ]
-
-        XCTAssertNil(hostFirstWindowCandidate(direct, matching: target))
         XCTAssertEqual(
-            hostFirstWindowCandidate(direct + sheets, matching: target),
+            hostUniqueWindowCandidate(
+                [
+                    (element: "same-frame-wrong-id", windowId: 40, frame: target),
+                    (element: "sheet", windowId: 41, frame: CGRect(x: 100.4, y: 99.6, width: 360, height: 150)),
+                ],
+                matching: 41,
+                bounds: target
+            ),
             "sheet"
         )
-        XCTAssertEqual(
-            hostFirstWindowCandidate(
-                [(element: "direct", frame: target)] + sheets,
-                matching: target
+        XCTAssertNil(
+            hostUniqueWindowCandidate(
+                [
+                    (element: "first", windowId: 41, frame: target),
+                    (element: "second", windowId: 41, frame: target),
+                ],
+                matching: 41,
+                bounds: target
             ),
-            "direct",
-            "an ordinary AXWindow match remains preferred over a child sheet"
+            "duplicate AX candidates for one CGWindowID must fail closed"
+        )
+        XCTAssertNil(
+            hostUniqueWindowCandidate(
+                [(element: "moved", windowId: 41, frame: CGRect(x: 101, y: 100, width: 360, height: 150))],
+                matching: 41,
+                bounds: target
+            )
         )
     }
 

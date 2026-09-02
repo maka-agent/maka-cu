@@ -37,6 +37,7 @@ public final class HostSnapshot {
     public let appId: String
     public let processGeneration: String
     public let windowId: CGWindowID
+    public let windowBounds: CGRect
     public let capturedAt: Int64
     public let windowDigest: String
     public let payload: HostSnapshotPayload
@@ -54,6 +55,7 @@ public final class HostSnapshot {
         appId: String,
         processGeneration: String,
         windowId: CGWindowID,
+        windowBounds: CGRect,
         capturedAt: Int64,
         windowDigest: String,
         payload: HostSnapshotPayload,
@@ -67,6 +69,7 @@ public final class HostSnapshot {
         self.appId = appId
         self.processGeneration = processGeneration
         self.windowId = windowId
+        self.windowBounds = windowBounds
         self.capturedAt = capturedAt
         self.windowDigest = windowDigest
         self.payload = payload

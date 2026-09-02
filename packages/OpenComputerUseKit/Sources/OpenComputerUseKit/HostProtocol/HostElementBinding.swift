@@ -263,6 +263,10 @@ public protocol HostElementBindingProbe {
     /// The input owner right now. This differs from `binding.pid` for
     /// out-of-process WebContent/renderer elements.
     func actualPid(_ binding: HostElementBinding) -> pid_t?
+    /// The retained element still belongs to the target the snapshot froze.
+    /// Window-tree bindings prove the exact CGWindowID; application-menu
+    /// bindings prove their application identity through E2 and `actualPid`.
+    func belongsToBoundTarget(_ binding: HostElementBinding) -> Bool
     /// E3 — the digest inputs as they are right now, or `nil` when the element
     /// can no longer be read at all.
     func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput?
@@ -277,6 +281,10 @@ public protocol HostElementBindingProbe {
 public extension HostElementBindingProbe {
     func actualPid(_ binding: HostElementBinding) -> pid_t? {
         binding.dispatchPid
+    }
+
+    func belongsToBoundTarget(_ binding: HostElementBinding) -> Bool {
+        true
     }
 
     func uniqueRefetch(_ binding: HostElementBinding) -> HostBindingRefetchResult {
@@ -370,6 +378,10 @@ public func hostVerifyBinding(
         dispatchStartTime == binding.dispatchProcessStartTime
     else {
         return HostDomainError(.processReplaced)
+    }
+
+    guard probe.belongsToBoundTarget(binding) else {
+        return HostDomainError(.windowChanged)
     }
 
     guard let current = probe.currentDigestInput(binding) else {

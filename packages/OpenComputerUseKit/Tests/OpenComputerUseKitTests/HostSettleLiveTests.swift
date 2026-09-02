@@ -89,7 +89,7 @@ final class HostSettleLiveTests: XCTestCase {
                 continue
             }
 
-            let probe = environment.bindingProbe(windowBounds: window.bounds)
+            let probe = environment.bindingProbe(windowId: window.windowId, windowBounds: window.bounds)
             var looks = 0
             var costliestLook: TimeInterval = 0
 

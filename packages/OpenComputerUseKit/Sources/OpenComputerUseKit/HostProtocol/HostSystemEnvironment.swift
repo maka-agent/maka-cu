@@ -87,7 +87,7 @@ public protocol HostSystemEnvironment {
     /// an application may return success and leave focus where it was, so the
     /// caller re-reads `focusedElement(pid:)` before posting anything.
     func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool
-    func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe
+    func bindingProbe(windowId: CGWindowID, windowBounds: CGRect) -> HostElementBindingProbe
     /// Posts an executor-derived, PID-bound event for an already bound semantic
     /// element action. Model-provided point dispatch never reaches this seam.
     func postPointEvent(
@@ -233,8 +233,8 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
         AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
     }
 
-    public func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe {
-        HostAXBindingProbe(windowBounds: windowBounds)
+    public func bindingProbe(windowId: CGWindowID, windowBounds: CGRect) -> HostElementBindingProbe {
+        HostAXBindingProbe(windowId: windowId, windowBounds: windowBounds)
     }
 
     public func postPointEvent(

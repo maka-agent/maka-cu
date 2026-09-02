@@ -166,7 +166,7 @@ final class HostMenuObserveLiveTests: XCTestCase {
                 ),
                 isMenu: true
             )
-            let probe = HostAXBindingProbe(windowBounds: .zero)
+            let probe = HostAXBindingProbe(windowId: window.windowId, windowBounds: .zero)
             var disagreed: [String] = []
             for binding in walk.bindings {
                 guard let now = probe.currentDigestInput(binding) else { continue }
