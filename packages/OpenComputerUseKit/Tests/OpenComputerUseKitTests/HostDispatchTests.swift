@@ -102,6 +102,114 @@ final class HostDispatchTests: XCTestCase {
         )
     }
 
+    func testElementReparentedToAnotherWindowIsRefusedBeforeAnyEffect() throws {
+        var environment = FakeEnvironment()
+        var probe = FakeBindingProbe()
+        probe.belongsToTarget = false
+        environment.probe = probe
+        environment.windows = [hostTestWindow()]
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(registry: harness.server.currentRegistry(), session: "s1")
+        harness.install(snapshot)
+
+        harness.send(dispatchElement(snapshot: snapshot))
+
+        XCTAssertEqual(try errorCode(harness.awaitResult()), "window_changed")
+        XCTAssertTrue(harness.environment.pointEvents.posted.isEmpty)
+    }
+
+    func testRepeatedActionStopsWhenTheApprovedTargetChangesAfterTheFirstEffect() throws {
+        var environment = FakeEnvironment()
+        environment.windows = [hostTestWindow()]
+        environment.probe = ActionReactiveBindingProbe(actions: environment.accessibilityActions)
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            element: hostTestElement(),
+            elementActions: [.press]
+        )
+        harness.install(snapshot)
+
+        harness.send(
+            dispatchElement(
+                snapshot: snapshot,
+                action: #"{"kind":"click","button":"left","count":2}"#
+            )
+        )
+        let result = try harness.awaitResult()
+
+        XCTAssertEqual(result["ok"] as? Bool, false)
+        XCTAssertEqual(result["outcome"] as? String, "unknown")
+        XCTAssertEqual(try errorCode(result), "outcome_unknown")
+        XCTAssertEqual(harness.environment.accessibilityActions.performed, [.press])
+        XCTAssertEqual(
+            harness.server.currentRegistry().snapshotState(session: "s1", snapshotId: snapshot.id),
+            .spent,
+            "the first effect landed before the target changed"
+        )
+    }
+
+    func testPostObservationRootLossDoesNotEraseAKnownSuccessfulEffect() throws {
+        let harness = ServerHarness()
+        try harness.begin()
+        let snapshot = hostTestSnapshot(registry: harness.server.currentRegistry(), session: "s1")
+        harness.install(snapshot)
+
+        harness.server.finishDispatch(
+            id: 81,
+            toolCallId: "call_1",
+            snapshot: snapshot,
+            outcome: .ok,
+            path: .axAttribute,
+            verificationIsTreeDelta: false,
+            fallbackVerdict: HostEffectVerdict(
+                effect: .confirmed,
+                verification: HostVerification(method: .valueReadback, observedChange: true)
+            ),
+            settleMode: .none,
+            observeAfter: HostObserveAfter(includeImage: false, settle: .none, menu: nil),
+            applicationLevel: false,
+            window: hostTestWindow()
+        )
+        let result = try harness.awaitResult()
+
+        XCTAssertEqual(result["ok"] as? Bool, true)
+        XCTAssertEqual(result["outcome"] as? String, "ok")
+        XCTAssertEqual(result["path"] as? String, "ax_attribute")
+        XCTAssertEqual(result["effect"] as? String, "confirmed")
+        XCTAssertEqual(
+            (result["postObservationError"] as? [String: Any])?["code"] as? String,
+            "window_gone"
+        )
+    }
+
+    func testMenuBindingUsesApplicationIdentityWhenItsSnapshotWindowIsGone() throws {
+        var environment = FakeEnvironment()
+        environment.apps = [
+            HostRunningApp(appId: hostTestAppId, pid: hostTestPid, name: "Notes", running: true),
+        ]
+        environment.windows = []
+
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+        let snapshot = hostTestSnapshot(
+            registry: harness.server.currentRegistry(),
+            session: "s1",
+            enabled: false,
+            isMenu: true
+        )
+        harness.install(snapshot)
+
+        harness.send(dispatchElement(snapshot: snapshot))
+
+        XCTAssertEqual(try errorCode(harness.awaitResult()), "element_disabled")
+    }
+
     // MARK: - Element binding (§4.3, §6.2)
 
     func testTheEchoedDigestSeparatesAnUnknownTokenFromAMismatchedEcho() throws {

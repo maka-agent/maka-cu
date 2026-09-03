@@ -1,6 +1,6 @@
 # 架构总览
 
-这个仓库当前已经从模板收敛成一个本地 `computer-use` 项目。macOS 主线是 Swift 实现的 `maka.cu/2` executor：它只对 Maka Electron host 说话，不再自带任何面向模型的 tool 层。Windows 和 Linux 仍是实验性的 Go runtime，暴露原先那组 9 个 Computer Use tools，尚未迁到 host protocol。
+这个仓库当前已经从模板收敛成一个本地 `computer-use` 项目。macOS 主线是 Swift 实现的 `maka.cu/3` executor：它只对 Maka Electron host 说话，不再自带任何面向模型的 tool 层。Windows 和 Linux 仍是实验性的 Go runtime，暴露原先那组 9 个 Computer Use tools，尚未迁到 host protocol。
 
 ## 当前目录结构
 
@@ -14,7 +14,7 @@
   实验性 Linux runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP 入口会嵌入 Python AT-SPI bridge，构建产物是 `open-computer-use`，并随已有 npm 包的 `dist/linux/<arch>/` bundled artifacts 分发。
 - `packages/OpenComputerUseKit`
   核心库，包含：
-  - `maka.cu/2` host protocol server（`HostProtocol/`）：line-framed JSON-RPC、session/snapshot 生命周期、element token 绑定、dispatch 路径裁决
+  - `maka.cu/3` host protocol server（`HostProtocol/`）：line-framed JSON-RPC、session/snapshot 生命周期、element token 绑定、dispatch 路径裁决
   - app discovery
   - Accessibility / 窗口 snapshot
   - 键鼠输入模拟
@@ -43,7 +43,7 @@
 - 辅助 drag panel 会跳转到对应的 `System Settings` 页面；点击 `Allow` 后，panel 会从主窗口里的按钮位置做一段 spring + curved frame 的入场，再落到 `System Settings` 内容区下沿。panel 默认保持在窗口右侧内容区下方居中并固定贴近窗口底边，不再依赖实时扫描权限页内部 `+ / -` 控件行；窗口层级上会显式排在当前 `System Settings` 窗口之上，避免被权限列表内容盖住，同时尽量减少对系统设置自身滚动区域的干扰。panel 内也补了显式返回按钮，允许用户中断当前 guidance、回到 onboarding 主窗口重新选择权限步骤。
 - 权限状态会合并 TCC 持久授权记录与当前 app 进程的 runtime preflight：TCC 中任一匹配 client 已授权即可视为 granted，避免 CLI 子进程与 GUI app 对授权状态看到不一致的结果；如果当前 `.app` 进程已经通过 `AXIsProcessTrusted()` / `CGPreflightScreenCaptureAccess()`，也会立即视为 granted，避免 stale 或不匹配的 TCC path 记录让 onboarding 浮层继续停留。正式 release 仍以 CI 打出来的 `Open Computer Use.app` 为准，而本地 debug/dev 打包现在显式命名为 `Open Computer Use (Dev).app`，并在 dev bundle 运行时优先认当前 dev 副本，避免系统设置里出现两个完全同名的条目。
 
-### 2. Host Protocol 层（`maka.cu/2`）
+### 2. Host Protocol 层（`maka.cu/3`）
 
 - transport 是 stdio 上的 line-framed JSON-RPC 2.0：一行一个 JSON value，UTF-8，`\n` 结尾，没有 `Content-Length`。stdout 只承载 JSON-RPC，诊断一律走 stderr。
 - 两层错误刻意分开：JSON-RPC `error` 只表示请求本身不可用（`-32000` 版本不匹配、`-32001` 未握手、`-32002` 未知 session、`-32003` 正在退出）；世界的状态一律是 `result` 里的 `{ ok: false, error: { code, message, detail } }`，`code` 是闭集，`message` 由 `code` 决定，`detail` 只有枚举和数字。
@@ -58,8 +58,8 @@
 
 - host protocol 自己实现 observe 与 dispatch：`observe` 产出结构化的 AX 树 + element token，可执行 mutation 通过 `dispatch.element` 或绑定已验证焦点的 `dispatch.key` 完成。生产动作面不接受坐标输入，也不把 semantic action 降级成 point event。它不复用 `ComputerUseService` 的 index 定址入口——把协议接到 index 上就等于把协议存在的理由接回来了。
 - mutation 消费 snapshot 的 dispatch authority，但 spent snapshot 的 revision 仍可作为下一次 post-action observation 的差分基线；expired/evicted snapshot 不参与。这样动作后的模型输入可以只写有效变化，又不放宽 single-use snapshot 合同。
-- `{kind: "app"}` 按 window inventory 的前到后顺序选择当前 sheet/窗口；`{kind: "window"}` 严格按 PID + window ID。AppKit sheet 在 CGWindow 侧是独立窗口、在 AX 侧是主窗口的 `AXSheet` / `AXDrawer` child，匹配顺序固定为 direct AXWindow 后 child sheet。
-- CGWindow 已出现但对应 AXWindow/AXSheet 尚未发布时，会对同一 PID/window/frame 最多重读 250ms；window inventory 本身不存在目标时仍立即 `window_gone`，不会回退到别的窗口。
+- `target.resolve` 按 window inventory 的前到后顺序为应用选择当前 sheet/窗口；后续 `observe` 严格绑定 app identity + PID + process generation + window ID。AppKit sheet 在 CGWindow 侧是独立窗口、在 AX 侧是主窗口的 `AXSheet` / `AXDrawer` child；executor 通过 `_AXUIElementGetWindow` 将 direct AXWindow 与 child sheet 精确映射到获批的 `CGWindowID`，不再以 frame 猜测身份。
+- CGWindow 已出现但对应 AXWindow/AXSheet 尚未发布时，会对同一 PID/window ID/bounds 最多重读 250ms；window inventory 本身不存在目标、SPI 不可用、匹配不唯一或 bounds 已变化时都 fail closed，不会回退到别的窗口。
 - host protocol 会同时绑定宿主 app 与真实 input-owner 的 PID/start time。WKWebView/WebContent 通过动态解析 `_AXUIElementGetActualPid` 识别；冷启动时用 XNU resource + jetsam coalition 的唯一 WebContent 关系做 readiness gate，首轮没有 `AXWebArea` 时等待 250ms 后重读一次。
 - observation 会删除被唯一真实 WebContent 元素遮蔽的叶子 accessibility mirror；歧义或非叶子 mirror 保留。WebContent 左键点击使用 host window 的精确 `CGWindowID` 和单通道 private SkyLight 事件，WindowServer 完成 renderer hop，不再走会产生 `isTrusted=false` 的 AX/JavaScript mirror。
 - retained AX 引用失效时允许同一进程世代内的唯一 identity-preserving refetch；只有 renderer-owned live 引用可在仅发生 `frame` reflow 时进入同一恢复路径。原生 AX 的 frame 变化和其它 digest 字段变化仍立即 fail closed，missing 与 ambiguous 分别拒绝为原始 stale code / `element_changed`。
@@ -135,11 +135,11 @@
 ## 关键边界
 
 - 开源版当前不复刻官方闭源实现里的 caller signing、私有 IPC、完整 overlay choreography 和 plugin 自安装逻辑。
-- 因为官方 `SkyComputerUseClient` 带有宿主侧 launch constraints，普通 stdio MCP client 在本机上可能被系统直接杀掉；如果要探测官方 bundled `computer-use`，`scripts/computer-use-cli` 的 app-server 模式现在只适合做工具清单和协议面观察。官方 `1.0.755` 的真实 tool call 还会经过 service-side sender authorization / active IPC client 追踪，外部 raw helper 即使走已签名 Codex binary，也可能返回 `Sender process is not authenticated`；需要真实使用官方工具时应走正常 Codex agent/tool 调用链，本仓库这条线现在只对 Maka host 说 `maka.cu/2`，不再提供可直连的 MCP server。
+- 因为官方 `SkyComputerUseClient` 带有宿主侧 launch constraints，普通 stdio MCP client 在本机上可能被系统直接杀掉；如果要探测官方 bundled `computer-use`，`scripts/computer-use-cli` 的 app-server 模式现在只适合做工具清单和协议面观察。官方 `1.0.755` 的真实 tool call 还会经过 service-side sender authorization / active IPC client 追踪，外部 raw helper 即使走已签名 Codex binary，也可能返回 `Sender process is not authenticated`；需要真实使用官方工具时应走正常 Codex agent/tool 调用链，本仓库这条线现在只对 Maka host 说 `maka.cu/3`，不再提供可直连的 MCP server。
 - 当前权限引导已经具备可运行 app、深链、拖拽辅助，以及一版更接近官方的 accessory panel 入场动画和返回 affordance；点击链路也已经补上独立 visual cursor、官方 asset fallback 和相对目标 window 的排序逻辑，并且在 overlay 可见期间会持续重申“排在目标 window 之上”，避免用户手动激活目标 app 后 cursor 被目标窗口重新盖住；但整体还没有完全复刻官方那套嵌入式 choreography / host 集成 / session approval 体验。
 - host protocol 的截图一律以文件路径返回，写在握手声明的 `imageDir` 里，生命周期与 snapshot 绑定；line-framed 通道上内联 base64 是 4/3 膨胀，而且一条 8 MB 的行会把其它待回的响应全部堵住。调试命令仍走 `ScreenCaptureKit` 捕获目标窗口，不再把普通 app 截图落盘到仓库或临时目录；编码前会按最大尺寸和目标字节数自适应缩小，避免复杂页面的大 PNG 触发 host 侧 MCP result 降级，同时 coordinate tools 继续按实际返回的 screenshot pixel 尺寸映射坐标；单次 ScreenCaptureKit capture 会设置超时，超时后省略 image block 而不是卡住整个 `get_app_state`。
 - host protocol 的会话状态是进程内内存态：每个 session 持有自己的 snapshot 集合、element token 字典和保留的 `AXUIElement` 引用；`session.end` 会一次性释放 snapshot、删除本会话写出的图片，并清掉 executor 画的 cursor，同时把释放计数报回去，好让这类回归有断言可写。
-- 本仓库旧 MCP/CLI 产品面仍有历史坐标 API；它和 Maka 的 `maka.cu/2` host protocol 是不同边界。Windows、macOS 和后续平台接入 Maka 时必须共享 semantic-only host contract，不能从旧 MCP/CLI schema 派生第二套 model action space 或 fallback ladder。
+- 本仓库旧 MCP/CLI 产品面仍有历史坐标 API；它和 Maka 的 `maka.cu/3` host protocol 是不同边界。Windows、macOS 和后续平台接入 Maka 时必须共享 semantic-only host contract，不能从旧 MCP/CLI schema 派生第二套 model action space 或 fallback ladder。
 
 ## 主要验证路径
 
@@ -162,4 +162,4 @@
   - `open-computer-use doctor --json`
   - `open-computer-use snapshot <app>`
   - `open-computer-use list-apps`
-  - `open-computer-use host`（读 stdin 的 `maka.cu/2` host protocol server）
+  - `open-computer-use host`（读 stdin 的 `maka.cu/3` host protocol server）

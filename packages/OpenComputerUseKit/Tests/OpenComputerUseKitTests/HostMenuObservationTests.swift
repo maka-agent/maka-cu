@@ -437,6 +437,7 @@ final class HostMenuObservationTests: XCTestCase {
             HostRunningApp(appId: hostTestAppId, pid: livePid, name: "Notes", running: true),
         ]
         environment.windows = [hostTestWindow(pid: livePid)]
+        environment.processStartTimes[livePid] = hostProcessStartTime(pid: livePid)
         // §4.3 E2 — these snapshots are minted by the real `buildSnapshot`, so
         // their bindings record the *machine's* start time for `livePid`. The
         // fixture's constant would be a different number and every dispatch below
@@ -504,7 +505,7 @@ final class HostMenuObservationTests: XCTestCase {
         let field = menu.map { ",\"menu\":\($0)" } ?? ""
         return """
         {"jsonrpc":"2.0","id":\(id),"method":"observe","params":{"session":"s1",\
-        "target":{"kind":"window","pid":\(livePid),"windowId":1},"includeImage":false\(field)}}
+        "target":{"kind":"window","appId":"\(hostTestAppId)","pid":\(livePid),"processGeneration":"\(hostProcessGeneration(hostProcessStartTime(pid: livePid) ?? 0))","windowId":1},"includeImage":false\(field)}}
         """
     }
 

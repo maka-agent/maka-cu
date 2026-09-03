@@ -1,13 +1,13 @@
 import Foundation
 
-/// Wire vocabulary for `maka.cu/2`, the protocol spoken between the Maka Electron
+/// Wire vocabulary for `maka.cu/3`, the protocol spoken between the Maka Electron
 /// host and this executor. See `docs/HOST_PROTOCOL.md`.
 ///
 /// Every enum here is a closed set on purpose. The protocol exists because the
 /// previous surface answered with free-form prose that the host had to pattern
 /// match; nothing in this file may grow an "other" case.
 
-public let makaCuProtocolVersion = "maka.cu/2"
+public let makaCuProtocolVersion = "maka.cu/3"
 
 /// `EX_CONFIG`. §2 requires this exact status after a version mismatch so the
 /// host can classify the start as `service_mismatch` and refuse to retry.
@@ -230,6 +230,12 @@ public func hostAppId(bundleIdentifier: String?, pid: pid_t) -> String {
     }
 
     return bundleIdentifier
+}
+
+/// A monotonic process identity used to prevent PID reuse from changing an
+/// already approved target.
+public func hostProcessGeneration(_ startTime: UInt64) -> String {
+    "pst:\(startTime)"
 }
 
 // MARK: - Dispatch vocabulary

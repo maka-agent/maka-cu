@@ -263,6 +263,10 @@ public protocol HostElementBindingProbe {
     /// The input owner right now. This differs from `binding.pid` for
     /// out-of-process WebContent/renderer elements.
     func actualPid(_ binding: HostElementBinding) -> pid_t?
+    /// The retained element still belongs to the target the snapshot froze.
+    /// Window-tree bindings prove the exact CGWindowID; application-menu
+    /// bindings prove their application identity through E2 and `actualPid`.
+    func belongsToBoundTarget(_ binding: HostElementBinding) -> Bool
     /// E3 — the digest inputs as they are right now, or `nil` when the element
     /// can no longer be read at all.
     func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput?
@@ -277,6 +281,10 @@ public protocol HostElementBindingProbe {
 public extension HostElementBindingProbe {
     func actualPid(_ binding: HostElementBinding) -> pid_t? {
         binding.dispatchPid
+    }
+
+    func belongsToBoundTarget(_ binding: HostElementBinding) -> Bool {
+        true
     }
 
     func uniqueRefetch(_ binding: HostElementBinding) -> HostBindingRefetchResult {
@@ -348,10 +356,10 @@ public final class HostElementBinding {
     }
 }
 
-/// Verifies E1, E2 and E3 in that order. The order matters: a dead reference and
-/// a recycled pid are different diagnoses, and reporting a digest mismatch for a
-/// process that no longer exists would send the host down the wrong retry path.
-public func hostVerifyBinding(
+/// Verifies the retained reference still belongs to the same process generation
+/// and exact approved window. Compound actions repeat this check after their
+/// first effect, when the effect itself may legitimately have changed E3.
+public func hostVerifyBindingTarget(
     _ binding: HostElementBinding,
     probe: HostElementBindingProbe
 ) -> HostDomainError? {
@@ -370,6 +378,24 @@ public func hostVerifyBinding(
         dispatchStartTime == binding.dispatchProcessStartTime
     else {
         return HostDomainError(.processReplaced)
+    }
+
+    guard probe.belongsToBoundTarget(binding) else {
+        return HostDomainError(.windowChanged)
+    }
+
+    return nil
+}
+
+/// Verifies E1, E2 and E3 in that order. The order matters: a dead reference and
+/// a recycled pid are different diagnoses, and reporting a digest mismatch for a
+/// process that no longer exists would send the host down the wrong retry path.
+public func hostVerifyBinding(
+    _ binding: HostElementBinding,
+    probe: HostElementBindingProbe
+) -> HostDomainError? {
+    if let failure = hostVerifyBindingTarget(binding, probe: probe) {
+        return failure
     }
 
     guard let current = probe.currentDigestInput(binding) else {

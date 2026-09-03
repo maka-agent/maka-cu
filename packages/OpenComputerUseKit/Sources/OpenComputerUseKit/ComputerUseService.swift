@@ -418,7 +418,7 @@ public final class ComputerUseService {
     public init() {}
 
     /// A human-readable catalogue for `open-computer-use list-apps`. The
-    /// `maka.cu/2` executor never emits this: `apps.list` answers with structured
+    /// `maka.cu/3` executor never emits this: `apps.list` answers with structured
     /// data, because rendered text is model-facing prose and Maka's runtime owns
     /// every word the model reads.
     public func listApps() -> String {

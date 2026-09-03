@@ -26,25 +26,79 @@ struct HostSessionParams: Decodable {
     let session: String
 }
 
-enum HostTargetSelector: Decodable, Equatable {
-    case app(String)
-    case window(pid: pid_t, windowId: CGWindowID)
+enum HostTargetResolutionSelector: Decodable {
+    case application(app: String, intent: Intent)
+    case window(windowId: CGWindowID)
+
+    enum Intent: String, Decodable {
+        case operate
+        case launch
+    }
 
     private enum Key: String, CodingKey {
         case kind
         case app
-        case pid
+        case intent
         case windowId
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: Key.self)
         switch try container.decode(String.self, forKey: .kind) {
-        case "app":
-            self = .app(try container.decode(String.self, forKey: .app))
+        case "application":
+            self = .application(
+                app: try container.decode(String.self, forKey: .app),
+                intent: try container.decode(Intent.self, forKey: .intent)
+            )
         case "window":
             self = .window(
+                windowId: CGWindowID(try container.decode(UInt32.self, forKey: .windowId))
+            )
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .kind,
+                in: container,
+                debugDescription: "target.kind"
+            )
+        }
+    }
+}
+
+struct HostTargetResolveParams: Decodable {
+    let target: HostTargetResolutionSelector
+}
+
+enum HostTargetSelector: Decodable, Equatable {
+    case window(appId: String, pid: pid_t, processGeneration: String, windowId: CGWindowID)
+
+    private enum Key: String, CodingKey {
+        case kind
+        case appId
+        case pid
+        case processGeneration
+        case windowId
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        switch try container.decode(String.self, forKey: .kind) {
+        case "window":
+            let processGeneration = try container.decode(String.self, forKey: .processGeneration)
+            guard
+                processGeneration.hasPrefix("pst:"),
+                let startTime = UInt64(processGeneration.dropFirst(4)),
+                hostProcessGeneration(startTime) == processGeneration
+            else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .processGeneration,
+                    in: container,
+                    debugDescription: "target.processGeneration"
+                )
+            }
+            self = .window(
+                appId: try container.decode(String.self, forKey: .appId),
                 pid: try container.decode(Int32.self, forKey: .pid),
+                processGeneration: processGeneration,
                 windowId: CGWindowID(try container.decode(UInt32.self, forKey: .windowId))
             )
         default:
@@ -396,6 +450,30 @@ struct HostAppsListResult: Encodable {
     }
 }
 
+struct HostTargetResolveResult: Encodable {
+    enum Resolution: String, Encodable {
+        case resolved
+        case missing
+        case ambiguous
+    }
+
+    struct Target: Encodable {
+        enum Kind: String, Encodable {
+            case installed
+            case running
+        }
+
+        let kind: Kind
+        let appId: String
+        let pid: Int32?
+        let processGeneration: String?
+        let windowId: UInt32?
+    }
+
+    let resolution: Resolution
+    let target: Target?
+}
+
 struct HostPermissionsResult: Encodable {
     let accessibility: Bool
     let screenRecording: Bool
@@ -453,7 +531,7 @@ struct HostScreenCaptureResult: Encodable {
 
 // MARK: - Server
 
-/// The `maka.cu/2` executor. One reader, serial lanes, one response per request
+/// The `maka.cu/3` executor. One reader, serial lanes, one response per request
 /// id. Everything the host needs to reason about is a declared field; nothing is
 /// inferred from a message string on either side.
 public final class HostProtocolServer {
@@ -591,6 +669,8 @@ public final class HostProtocolServer {
             } ifShuttingDown: { [weak self] in
                 self?.emit(id: id, failure: HostDomainError(.aborted))
             }
+        case "target.resolve":
+            enqueueControl(id: id, data: data, handler: handleTargetResolve)
         case "window.list":
             lanes.enqueue(.control) { [weak self] in
                 self?.handleWindowList(id: id)
@@ -692,7 +772,8 @@ public final class HostProtocolServer {
     }
 
     private func targetLane<Params>(for params: Params) -> HostLaneScheduler.Lane {
-        if let observe = params as? HostObserveParams, case let .window(pid, windowId) = observe.target {
+        if let observe = params as? HostObserveParams,
+           case let .window(_, pid, _, windowId) = observe.target {
             return .target(pid: pid, windowId: windowId)
         }
 
@@ -1027,5 +1108,93 @@ public final class HostProtocolServer {
         }
 
         emit(id: id, payload: HostAppsListResult(apps: apps))
+    }
+
+    private func handleTargetResolve(id: Int, params: HostTargetResolveParams) {
+        switch params.target {
+        case .application(let app, .launch):
+            switch environment.installedBundleIdentifiers(matching: app) {
+            case .failure(let error):
+                emit(id: id, failure: error)
+            case .success(let bundleIds):
+                let unique = Array(Set(bundleIds)).sorted()
+                guard unique.count == 1, let bundleId = unique.first else {
+                    emit(
+                        id: id,
+                        payload: HostTargetResolveResult(
+                            resolution: unique.isEmpty ? .missing : .ambiguous,
+                            target: nil
+                        )
+                    )
+                    return
+                }
+                emit(
+                    id: id,
+                    payload: HostTargetResolveResult(
+                        resolution: .resolved,
+                        target: .init(
+                            kind: .installed,
+                            appId: bundleId,
+                            pid: nil,
+                            processGeneration: nil,
+                            windowId: nil
+                        )
+                    )
+                )
+            }
+
+        case .application(let app, .operate):
+            let running = environment.runningApps().filter(\.running)
+            let exact = running.filter { $0.appId == app }
+            let matchingApps = exact.isEmpty
+                ? running.filter { $0.name.caseInsensitiveCompare(app) == .orderedSame }
+                : exact
+            let matchingPids = Set(matchingApps.map(\.pid))
+            resolveRunningTarget(
+                id: id,
+                windows: environment.onScreenWindows().filter {
+                    matchingPids.contains($0.pid) && $0.layer == 0 && $0.onScreen
+                }
+            )
+
+        case .window(let windowId):
+            resolveRunningTarget(
+                id: id,
+                windows: environment.onScreenWindows().filter { $0.windowId == windowId }
+            )
+        }
+    }
+
+    private func resolveRunningTarget(id: Int, windows: [HostWindowInfo]) {
+        guard windows.count == 1, let window = windows.first else {
+            emit(
+                id: id,
+                payload: HostTargetResolveResult(
+                    resolution: windows.isEmpty ? .missing : .ambiguous,
+                    target: nil
+                )
+            )
+            return
+        }
+        guard let startTime = environment.processStartTime(pid: window.pid) else {
+            emit(
+                id: id,
+                payload: HostTargetResolveResult(resolution: .missing, target: nil)
+            )
+            return
+        }
+        emit(
+            id: id,
+            payload: HostTargetResolveResult(
+                resolution: .resolved,
+                target: .init(
+                    kind: .running,
+                    appId: window.appId,
+                    pid: window.pid,
+                    processGeneration: hostProcessGeneration(startTime),
+                    windowId: window.windowId
+                )
+            )
+        )
     }
 }

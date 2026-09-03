@@ -277,7 +277,7 @@ final class HostObservePerformanceLiveTests: XCTestCase {
             let menuClause = menu ? #","menu":{"scope":"bar"}"# : ""
             let started = DispatchTime.now().uptimeNanoseconds
             server.handle(line: #"""
-            {"jsonrpc":"2.0","id":\#(identifier),"method":"observe","params":{"session":"bench","target":{"kind":"window","pid":\#(window.pid),"windowId":\#(window.windowId)},"includeImage":\#(image)\#(menuClause)}}
+            {"jsonrpc":"2.0","id":\#(identifier),"method":"observe","params":{"session":"bench","target":{"kind":"window","appId":"\#(window.appId)","pid":\#(window.pid),"processGeneration":"\#(hostProcessGeneration(hostProcessStartTime(pid: window.pid) ?? 0))","windowId":\#(window.windowId)},"includeImage":\#(image)\#(menuClause)}}
             """#)
             let response = try inbox.next(timeout: 120)
             let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000

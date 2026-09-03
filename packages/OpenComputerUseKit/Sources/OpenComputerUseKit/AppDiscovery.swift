@@ -241,6 +241,46 @@ enum AppDiscovery {
         )
     }
 
+    /// Resolve an installed application without starting it. Managed hosts use
+    /// this before approval, so this path must remain free of launch or focus
+    /// side effects.
+    static func matchingInstalledBundleIdentifiers(_ query: String) throws -> [String] {
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedQuery.isEmpty else { return [] }
+
+        if let blocked = blockedBundleIdentifier(forQuery: normalizedQuery) {
+            throw AppSafetyPolicy.permissionDenied(bundleIdentifier: blocked)
+        }
+
+        if isBundleIdentifierQuery(normalizedQuery) {
+            guard
+                let url = NSWorkspace.shared.urlForApplication(
+                    withBundleIdentifier: normalizedQuery
+                ),
+                let bundleIdentifier = Bundle(url: url)?.bundleIdentifier,
+                !AppSafetyPolicy.isBlocked(bundleIdentifier: bundleIdentifier)
+            else {
+                return []
+            }
+            return [bundleIdentifier]
+        }
+
+        return Array(
+            Set(
+                applicationURLs(named: normalizedQuery).compactMap { url in
+                    let bundleIdentifier = Bundle(url: url)?.bundleIdentifier
+                    guard
+                        let bundleIdentifier,
+                        !AppSafetyPolicy.isBlocked(bundleIdentifier: bundleIdentifier)
+                    else {
+                        return nil
+                    }
+                    return bundleIdentifier
+                }
+            )
+        ).sorted()
+    }
+
     private static func resolvedRunningApp(in descriptors: [RunningAppDescriptor], matching query: String) -> RunningAppDescriptor? {
         if isBundleIdentifierQuery(query) {
             return descriptors.first(where: { descriptor in
@@ -357,14 +397,19 @@ enum AppDiscovery {
     }
 
     private static func applicationURL(named query: String) -> URL? {
+        applicationURLs(named: query).first
+    }
+
+    private static func applicationURLs(named query: String) -> [URL] {
         let targetName = stripAppSuffix(from: query).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !targetName.isEmpty else {
-            return nil
+            return []
         }
 
         let fileManager = FileManager.default
         let resourceKeys: [URLResourceKey] = [.isApplicationKey, .isDirectoryKey, .nameKey]
         var visitedPaths: Set<String> = []
+        var matches: [URL] = []
 
         for root in standardApplicationSearchRoots where fileManager.fileExists(atPath: root.path) {
             guard let enumerator = fileManager.enumerator(
@@ -387,12 +432,12 @@ enum AppDiscovery {
 
                 let candidateName = stripAppSuffix(from: candidateURL.lastPathComponent)
                 if candidateName.caseInsensitiveCompare(targetName) == .orderedSame {
-                    return candidateURL
+                    matches.append(candidateURL)
                 }
             }
         }
 
-        return nil
+        return matches.sorted { $0.path < $1.path }
     }
 
     /// §5.7 — the configuration every launch is asked for.

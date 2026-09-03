@@ -5,7 +5,7 @@ import Foundation
 import XCTest
 @testable import OpenComputerUseKit
 
-/// Conformance vectors for `maka.cu/2` (§12). Each test here fails without the
+/// Conformance vectors for `maka.cu/3` (§12). Each test here fails without the
 /// rule it names; the rules that need a live desktop (real Accessibility
 /// invalidation, real capture) are called out in the commit rather than faked.
 final class HostProtocolTests: XCTestCase {
@@ -202,9 +202,16 @@ final class HostProtocolTests: XCTestCase {
         let failure = hostVerifyBinding(binding, probe: probe)
         XCTAssertEqual(failure?.code, .elementChanged)
         XCTAssertEqual(failure?.detail, .changed([.label]))
+        XCTAssertNil(
+            hostVerifyBindingTarget(binding, probe: probe),
+            "an earlier effect may change E3 without changing its approved target"
+        )
 
         probe = FakeBindingProbe()
         XCTAssertNil(hostVerifyBinding(binding, probe: probe))
+
+        probe.belongsToTarget = false
+        XCTAssertEqual(hostVerifyBinding(binding, probe: probe)?.code, .windowChanged)
     }
 
     func testWindowDigestChangesWhenAnUnrelatedElementChanges() {
@@ -752,7 +759,7 @@ final class HostProtocolTests: XCTestCase {
 
     func testAnyMethodBeforeHostHelloIsHandshakeRequired() throws {
         let harness = ServerHarness()
-        harness.send(#"{"jsonrpc":"2.0","id":1,"method":"observe","params":{"session":"s","target":{"kind":"app","app":"Notes"}}}"#)
+        harness.send(#"{"jsonrpc":"2.0","id":1,"method":"observe","params":{"session":"s","target":{"kind":"window","appId":"com.apple.Notes","pid":42,"processGeneration":"pst:1","windowId":7}}}"#)
 
         let error = try XCTUnwrap(try harness.awaitResponse()["error"] as? [String: Any])
         XCTAssertEqual(error["code"] as? Int, -32001)
@@ -770,7 +777,7 @@ final class HostProtocolTests: XCTestCase {
         XCTAssertEqual(error["code"] as? Int, -32000)
         XCTAssertEqual(error["message"] as? String, "protocol_version_mismatch")
         let data = try XCTUnwrap(error["data"] as? [String: Any])
-        XCTAssertEqual(data["supported"] as? [String], ["maka.cu/2"])
+        XCTAssertEqual(data["supported"] as? [String], ["maka.cu/3"])
 
         // §2 — `EX_CONFIG`, so the host classifies the start as `service_mismatch`
         // and does not retry.
@@ -783,7 +790,7 @@ final class HostProtocolTests: XCTestCase {
 
         let result = try XCTUnwrap(try harness.awaitResponse()["result"] as? [String: Any])
         XCTAssertEqual(result["ok"] as? Bool, true)
-        XCTAssertEqual(result["protocol"] as? String, "maka.cu/2")
+        XCTAssertEqual(result["protocol"] as? String, "maka.cu/3")
 
         let limits = try XCTUnwrap(result["limits"] as? [String: Any])
         for key in [
@@ -870,7 +877,7 @@ final class HostProtocolTests: XCTestCase {
         harness.sendHello()
         _ = try harness.awaitResponse()
 
-        harness.send(#"{"jsonrpc":"2.0","id":6,"method":"observe","params":{"session":"never-begun","target":{"kind":"app","app":"Notes"}}}"#)
+        harness.send(#"{"jsonrpc":"2.0","id":6,"method":"observe","params":{"session":"never-begun","target":{"kind":"window","appId":"com.apple.Notes","pid":42,"processGeneration":"pst:1","windowId":7}}}"#)
         let error = try XCTUnwrap(try harness.awaitResponse()["error"] as? [String: Any])
         XCTAssertEqual(error["code"] as? Int, -32002)
     }
@@ -891,7 +898,7 @@ final class HostProtocolTests: XCTestCase {
         harness.send(#"{"jsonrpc":"2.0","id":2,"method":"session.begin","params":{"session":"s1","captureScope":"window"}}"#)
         _ = try harness.awaitResponse()
 
-        harness.send(#"{"jsonrpc":"2.0","id":3,"method":"observe","params":{"session":"s1","target":{"kind":"window","pid":1,"windowId":1},"maxElements":999999}}"#)
+        harness.send(#"{"jsonrpc":"2.0","id":3,"method":"observe","params":{"session":"s1","target":{"kind":"window","appId":"pid:1","pid":1,"processGeneration":"pst:1","windowId":1},"maxElements":999999}}"#)
         let error = try XCTUnwrap(try harness.awaitResponse()["error"] as? [String: Any])
         XCTAssertEqual(error["code"] as? Int, -32602)
         XCTAssertEqual((error["data"] as? [String: Any])?["field"] as? String, "maxElements")
@@ -1777,6 +1784,59 @@ final class HostProtocolTests: XCTestCase {
         XCTAssertEqual(result["ok"] as? Bool, true, "it happened; hiding it does not un-happen it")
         XCTAssertEqual(result["foregroundTaken"] as? Bool, true)
         XCTAssertEqual(harness.environment.frontmost.reads, 2, "before and after, not once")
+    }
+
+    // MARK: - Trusted target resolution (§5.2)
+
+    func testTargetResolveFreezesRunningWindowAndProcessGeneration() throws {
+        var environment = FakeEnvironment()
+        environment.apps = [
+            HostRunningApp(
+                appId: hostTestAppId,
+                pid: hostTestPid,
+                name: "Fixture",
+                running: true
+            )
+        ]
+        environment.windows = [hostTestWindow()]
+        environment.processStartTimes[hostTestPid] = hostTestProcessStartTime
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+
+        harness.send(#"{"jsonrpc":"2.0","id":10,"method":"target.resolve","params":{"target":{"kind":"window","windowId":7}}}"#)
+        let result = try harness.awaitResult()
+        XCTAssertEqual(result["resolution"] as? String, "resolved")
+        let target = try XCTUnwrap(result["target"] as? [String: Any])
+        XCTAssertEqual(target["kind"] as? String, "running")
+        XCTAssertEqual(target["appId"] as? String, hostTestAppId)
+        XCTAssertEqual(target["pid"] as? Int, Int(hostTestPid))
+        XCTAssertEqual(
+            target["processGeneration"] as? String,
+            hostProcessGeneration(hostTestProcessStartTime)
+        )
+        XCTAssertEqual(target["windowId"] as? Int, 7)
+    }
+
+    func testTargetResolveDoesNotLaunchInstalledApplication() throws {
+        var environment = FakeEnvironment()
+        environment.installedBundleIds = ["com.apple.TextEdit"]
+        let harness = ServerHarness(environment: environment)
+        try harness.begin()
+
+        harness.send(#"{"jsonrpc":"2.0","id":11,"method":"target.resolve","params":{"target":{"kind":"application","app":"TextEdit","intent":"launch"}}}"#)
+        let result = try harness.awaitResult()
+        XCTAssertEqual(result["resolution"] as? String, "resolved")
+        XCTAssertEqual((result["target"] as? [String: Any])?["kind"] as? String, "installed")
+        XCTAssertEqual(environment.launches.requests.count, 0)
+    }
+
+    func testObserveRejectsNonCanonicalProcessGeneration() throws {
+        let harness = ServerHarness()
+        try harness.begin()
+
+        harness.send(#"{"jsonrpc":"2.0","id":12,"method":"observe","params":{"session":"s1","target":{"kind":"window","appId":"com.apple.TextEdit","pid":42,"processGeneration":"pst:01","windowId":7}}}"#)
+        let error = try XCTUnwrap(try harness.awaitResponse()["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? Int, -32602)
     }
 
     // MARK: - Seeing the machine change (§5.5, §5.7)

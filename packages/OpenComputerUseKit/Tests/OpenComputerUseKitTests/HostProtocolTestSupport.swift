@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 @testable import OpenComputerUseKit
 
-// Shared doubles for the `maka.cu/2` conformance vectors. Everything here stands
+// Shared doubles for the `maka.cu/3` conformance vectors. Everything here stands
 // in for the live machine so the §4 binding rules can be asserted without a
 // desktop; nothing here fakes protocol logic.
 
@@ -77,6 +77,7 @@ struct FakeBindingProbe: HostElementBindingProbe {
     var startTime: UInt64? = hostTestProcessStartTime
     var startTimes: [pid_t: UInt64] = [:]
     var actualPidOverride: pid_t?
+    var belongsToTarget = true
     var override: HostElementDigestInput?
     var refetch: HostBindingRefetchResult = .missing
     var webContentEquivalent: HostElementBinding?
@@ -90,6 +91,7 @@ struct FakeBindingProbe: HostElementBindingProbe {
     func actualPid(_ binding: HostElementBinding) -> pid_t? {
         actualPidOverride ?? binding.dispatchPid
     }
+    func belongsToBoundTarget(_ binding: HostElementBinding) -> Bool { belongsToTarget }
     func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput? {
         override ?? binding.digestInput
     }
@@ -356,6 +358,38 @@ final class WindowElementLog {
     }
 }
 
+final class AccessibilityActionLog {
+    private let lock = NSLock()
+    private(set) var performed: [HostElementActionName] = []
+    var result: AXError = .success
+
+    func perform(_ action: HostElementActionName) -> AXError {
+        lock.lock()
+        defer { lock.unlock() }
+        performed.append(action)
+        return result
+    }
+}
+
+/// Keeps the original binding valid until the first Accessibility action lands,
+/// then reports that the retained element moved to another window.
+final class ActionReactiveBindingProbe: HostElementBindingProbe {
+    private let actions: AccessibilityActionLog
+
+    init(actions: AccessibilityActionLog) {
+        self.actions = actions
+    }
+
+    func isReferenceAlive(_ binding: HostElementBinding) -> Bool { true }
+    func processStartTime(pid: pid_t) -> UInt64? { hostTestProcessStartTime }
+    func belongsToBoundTarget(_ binding: HostElementBinding) -> Bool {
+        actions.performed.isEmpty
+    }
+    func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput? {
+        binding.digestInput
+    }
+}
+
 struct FakeEnvironment: HostSystemEnvironment {
     var locked = false
     var accessibilityTrusted = true
@@ -385,7 +419,10 @@ struct FakeEnvironment: HostSystemEnvironment {
     var pointEvents = PointEventLog()
     var keyEvents = KeyEventLog()
     var focusRequests = FocusRequestLog()
+    var accessibilityActions = AccessibilityActionLog()
     var launches = AppLaunchLog()
+    var installedBundleIds: [String] = []
+    var processStartTimes: [pid_t: UInt64] = [:]
 
     func screenIsLocked() -> Bool { locked }
 
@@ -397,6 +434,10 @@ struct FakeEnvironment: HostSystemEnvironment {
     }
 
     func runningApps() -> [HostRunningApp] { inventory.read() }
+    func installedBundleIdentifiers(
+        matching query: String
+    ) -> Result<[String], HostDomainError> { .success(installedBundleIds) }
+    func processStartTime(pid: pid_t) -> UInt64? { processStartTimes[pid] ?? UInt64(pid) }
     func frontmostApplicationPid() -> pid_t? { frontmost.read() }
     func restoreFrontmostApplication(pid: pid_t) -> Bool { frontmost.restore(pid) }
     func beginSyntheticTargetFocus(
@@ -417,7 +458,11 @@ struct FakeEnvironment: HostSystemEnvironment {
     func menuBarNode(pid: pid_t) -> HostAccessibilityNode? { menuBar }
     func focusedElement(pid: pid_t) -> AXUIElement? { focusRequests.currentFocus ?? focused }
     func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool { focusRequests.record(element) }
-    func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe { probe }
+    func bindingProbe(windowId: CGWindowID, windowBounds: CGRect) -> HostElementBindingProbe { probe }
+    func performAccessibilityAction(
+        _ action: HostElementActionName,
+        on element: AXUIElement
+    ) -> AXError { accessibilityActions.perform(action) }
 
     func postPointEvent(
         _ action: HostPointAction,
@@ -602,6 +647,7 @@ func hostTestBinding(
     frame: HostRect? = nil,
     element: AXUIElement? = nil,
     actions: [HostElementActionName] = [.press],
+    isMenu: Bool = false,
     dispatchPid: pid_t = hostTestPid,
     dispatchProcessStartTime: UInt64 = hostTestProcessStartTime
 ) -> HostElementBinding {
@@ -634,7 +680,8 @@ func hostTestBinding(
             actions: actions,
             digest: hostElementDigest(digestInput),
             truncated: []
-        )
+        ),
+        isMenu: isMenu
     )
 }
 
@@ -650,6 +697,7 @@ func hostTestSnapshot(
     elementFrame: HostRect? = nil,
     element: AXUIElement? = nil,
     elementActions: [HostElementActionName] = [.press],
+    isMenu: Bool = false,
     dispatchPid: pid_t? = nil,
     dispatchProcessStartTime: UInt64? = nil
 ) -> HostSnapshot {
@@ -665,6 +713,7 @@ func hostTestSnapshot(
         frame: elementFrame,
         element: element,
         actions: elementActions,
+        isMenu: isMenu,
         dispatchPid: dispatchPid ?? hostTestPid,
         dispatchProcessStartTime:
             dispatchProcessStartTime ?? hostTestProcessStartTime
@@ -681,6 +730,7 @@ func hostTestSnapshot(
         capturedAt: capturedAt,
         target: HostWindowTarget(
             pid: window.pid,
+            processGeneration: hostProcessGeneration(hostTestProcessStartTime),
             windowId: window.windowId,
             appId: window.appId,
             appName: window.appName,
@@ -706,7 +756,10 @@ func hostTestSnapshot(
         id: id,
         session: session,
         pid: window.pid,
+        appId: window.appId,
+        processGeneration: hostProcessGeneration(hostTestProcessStartTime),
         windowId: window.windowId,
+        windowBounds: window.bounds,
         capturedAt: capturedAt,
         windowDigest: windowDigest,
         payload: payload,
@@ -747,6 +800,7 @@ func hostTestWalkedSnapshot(
         capturedAt: capturedAt,
         target: HostWindowTarget(
             pid: window.pid,
+            processGeneration: hostProcessGeneration(hostTestProcessStartTime),
             windowId: window.windowId,
             appId: window.appId,
             appName: window.appName,
@@ -772,7 +826,10 @@ func hostTestWalkedSnapshot(
         id: id,
         session: session,
         pid: window.pid,
+        appId: window.appId,
+        processGeneration: hostProcessGeneration(hostTestProcessStartTime),
         windowId: window.windowId,
+        windowBounds: window.bounds,
         capturedAt: capturedAt,
         windowDigest: windowDigest,
         payload: payload,

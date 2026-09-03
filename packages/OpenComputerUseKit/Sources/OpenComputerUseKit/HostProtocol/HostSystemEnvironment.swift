@@ -33,6 +33,11 @@ public protocol HostSystemEnvironment {
     func screenIsLocked() -> Bool
     func permissions() -> PermissionDiagnostics
     func runningApps() -> [HostRunningApp]
+    /// Bundle identifiers matching an installed application, without launching
+    /// it or changing foreground state.
+    func installedBundleIdentifiers(matching query: String) -> Result<[String], HostDomainError>
+    /// Stable process birth identity used to bind an approved running target.
+    func processStartTime(pid: pid_t) -> UInt64?
     /// The pid holding the foreground, or `nil` when nothing ordinary does.
     ///
     /// It is behind the seam because `apps.launch` reports `foregroundTaken` by
@@ -82,7 +87,13 @@ public protocol HostSystemEnvironment {
     /// an application may return success and leave focus where it was, so the
     /// caller re-reads `focusedElement(pid:)` before posting anything.
     func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool
-    func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe
+    func bindingProbe(windowId: CGWindowID, windowBounds: CGRect) -> HostElementBindingProbe
+    /// Performs one Accessibility action after the protocol handler has
+    /// revalidated the exact approved target for this individual effect.
+    func performAccessibilityAction(
+        _ action: HostElementActionName,
+        on element: AXUIElement
+    ) -> AXError
     /// Posts an executor-derived, PID-bound event for an already bound semantic
     /// element action. Model-provided point dispatch never reaches this seam.
     func postPointEvent(
@@ -127,6 +138,20 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
                 running: !app.runningApplication.isTerminated
             )
         }
+    }
+
+    public func installedBundleIdentifiers(
+        matching query: String
+    ) -> Result<[String], HostDomainError> {
+        do {
+            return .success(try AppDiscovery.matchingInstalledBundleIdentifiers(query))
+        } catch {
+            return .failure(hostAppLaunchFailure(error))
+        }
+    }
+
+    public func processStartTime(pid: pid_t) -> UInt64? {
+        hostProcessStartTime(pid: pid)
     }
 
     public func frontmostApplicationPid() -> pid_t? {
@@ -214,8 +239,15 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
         AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
     }
 
-    public func bindingProbe(windowBounds: CGRect) -> HostElementBindingProbe {
-        HostAXBindingProbe(windowBounds: windowBounds)
+    public func bindingProbe(windowId: CGWindowID, windowBounds: CGRect) -> HostElementBindingProbe {
+        HostAXBindingProbe(windowId: windowId, windowBounds: windowBounds)
+    }
+
+    public func performAccessibilityAction(
+        _ action: HostElementActionName,
+        on element: AXUIElement
+    ) -> AXError {
+        AXUIElementPerformAction(element, action.rawAXAction as CFString)
     }
 
     public func postPointEvent(
@@ -345,14 +377,14 @@ public func hostAppLaunchFailure(_ error: Error) -> HostDomainError {
     }
 }
 
-// MARK: - Resolving `{ "kind": "app" }`
+// MARK: - Resolving a running app identity
 
 /// §5.1 / §5.2 — the executor resolves an `appId` by exact string match, against
 /// applications that are **already running**, and refuses everything else.
 ///
 /// Two rules are load-bearing and neither is defensive:
 ///
-/// - No launch. `observe` is a read. The previous implementation went through
+/// - No launch. `target.resolve` is a read. The previous implementation went through
 ///   `AppDiscovery.resolve`, which falls through to `NSWorkspace.openApplication`
 ///   with a configuration that activates, and then polls for five seconds — so
 ///   observing a not-running app started it and took the user's foreground, with

@@ -11,7 +11,7 @@ public func resolvedOpenComputerUseVersion(bundle: Bundle = .main) -> String {
     return openComputerUseVersion
 }
 
-/// Reported in the `maka.cu/2` handshake so a host trace can name the exact
+/// Reported in the `maka.cu/3` handshake so a host trace can name the exact
 /// executor build. Populated at package time through the app bundle; a source
 /// checkout has no commit to claim, and saying `unknown` is better than a value
 /// the host would trust.

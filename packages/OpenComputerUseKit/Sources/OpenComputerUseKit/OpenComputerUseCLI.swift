@@ -2,7 +2,7 @@ import Foundation
 
 public enum OpenComputerUseCLICommand: Equatable {
     case launchOnboarding
-    /// Speak `maka.cu/2` over stdio. This is the only automation entry point:
+    /// Speak `maka.cu/3` over stdio. This is the only automation entry point:
     /// the Maka host owns every model-facing word, so there is no second,
     /// model-shaped surface here to drift from it.
     case host
@@ -84,7 +84,7 @@ public func openComputerUseHelpText(command: String? = nil) -> String {
           open-computer-use
 
         Commands:
-          host                 Speak the maka.cu/2 host protocol over stdio.
+          host                 Speak the maka.cu/3 host protocol over stdio.
           doctor               Print runtime diagnostics and launch onboarding if needed.
           list-apps            Print running or recently used apps.
           snapshot <app>       Print the current accessibility snapshot for an app.
@@ -105,7 +105,7 @@ public func openComputerUseHelpText(command: String? = nil) -> String {
         Usage:
           open-computer-use host
 
-        Speak the maka.cu/2 host protocol over stdio. line-delimited JSON-RPC 2.0,
+        Speak the maka.cu/3 host protocol over stdio. line-delimited JSON-RPC 2.0,
         one JSON value per line. The Maka host drives it; it is not interactive.
         See docs/maka-cu-host-protocol.md in the Maka repository.
         """
