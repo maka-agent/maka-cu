@@ -15,6 +15,8 @@
 - **Resolve targets**: Added a side-effect-free resolver for installed applications and exact running windows.
 - **Bind execution**: Added process-generation evidence and exact app, PID, and window validation around observations and effects.
 - **Bind AX windows exactly**: Resolve direct windows and attached sheets through their exact `CGWindowID`, reject ambiguous/frame-only matches, and re-check the retained element immediately before effects.
+- **Revalidate compound actions**: Re-check the approved root, binding, and derived-element window before every Accessibility action or write; stop repeated actions with `outcome_unknown` if an earlier effect already landed.
+- **Preserve completed effects**: Keep a known successful outcome and its evidence when only post-action observation reports `window_gone`.
 - **Clarify menus**: Keep menu dispatch application-bound while window-tree dispatch remains bound to the frozen window.
 - **Advance protocol**: Replaced `maka.cu/2` with the incompatible `maka.cu/3` contract and updated focused tests and documentation.
 - **Remove stale harnesses**: Deleted the two hard-coded v2 proof scripts now superseded by the v3 tests and protocol tooling.

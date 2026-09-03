@@ -1031,7 +1031,7 @@ Menu bindings are application-level, not window-level. macOS attaches the menu
 bar to the application responder chain, so a menu item is validated against the
 snapshot's app identity, PID generation, input owner and element digest, but it
 is not required to descend from the snapshot window. Window-tree elements do
-have that additional requirement: immediately before an effect they must still
+have that additional requirement: immediately before every effect they must still
 belong to the exact `CGWindowID` frozen by the snapshot.
 Because menu effects have no authoritative window root, `settle: "quiesce"`
 does not run a window-tree settle for them; the response keeps the action's own

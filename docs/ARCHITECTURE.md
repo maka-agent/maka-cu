@@ -139,7 +139,7 @@
 - 当前权限引导已经具备可运行 app、深链、拖拽辅助，以及一版更接近官方的 accessory panel 入场动画和返回 affordance；点击链路也已经补上独立 visual cursor、官方 asset fallback 和相对目标 window 的排序逻辑，并且在 overlay 可见期间会持续重申“排在目标 window 之上”，避免用户手动激活目标 app 后 cursor 被目标窗口重新盖住；但整体还没有完全复刻官方那套嵌入式 choreography / host 集成 / session approval 体验。
 - host protocol 的截图一律以文件路径返回，写在握手声明的 `imageDir` 里，生命周期与 snapshot 绑定；line-framed 通道上内联 base64 是 4/3 膨胀，而且一条 8 MB 的行会把其它待回的响应全部堵住。调试命令仍走 `ScreenCaptureKit` 捕获目标窗口，不再把普通 app 截图落盘到仓库或临时目录；编码前会按最大尺寸和目标字节数自适应缩小，避免复杂页面的大 PNG 触发 host 侧 MCP result 降级，同时 coordinate tools 继续按实际返回的 screenshot pixel 尺寸映射坐标；单次 ScreenCaptureKit capture 会设置超时，超时后省略 image block 而不是卡住整个 `get_app_state`。
 - host protocol 的会话状态是进程内内存态：每个 session 持有自己的 snapshot 集合、element token 字典和保留的 `AXUIElement` 引用；`session.end` 会一次性释放 snapshot、删除本会话写出的图片，并清掉 executor 画的 cursor，同时把释放计数报回去，好让这类回归有断言可写。
-- 本仓库旧 MCP/CLI 产品面仍有历史坐标 API；它和 Maka 的 `maka.cu/2` host protocol 是不同边界。Windows、macOS 和后续平台接入 Maka 时必须共享 semantic-only host contract，不能从旧 MCP/CLI schema 派生第二套 model action space 或 fallback ladder。
+- 本仓库旧 MCP/CLI 产品面仍有历史坐标 API；它和 Maka 的 `maka.cu/3` host protocol 是不同边界。Windows、macOS 和后续平台接入 Maka 时必须共享 semantic-only host contract，不能从旧 MCP/CLI schema 派生第二套 model action space 或 fallback ladder。
 
 ## 主要验证路径
 
