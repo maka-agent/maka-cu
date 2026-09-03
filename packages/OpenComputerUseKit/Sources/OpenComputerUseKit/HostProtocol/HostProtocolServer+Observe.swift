@@ -715,13 +715,6 @@ extension HostProtocolServer {
             Thread.sleep(forTimeInterval: 0.2)
         }
 
-        // The retained AX reference may be reparented after the earlier probe.
-        // Re-check the exact target immediately before the first effect.
-        if let failure = hostVerifyBinding(effectiveBinding, probe: probe) {
-            refuse(failure)
-            return
-        }
-
         let settleMode = params.observeAfter?.settle ?? HostSettleMode.none
         let frontmostBefore = environment.frontmostApplicationPid()
         let windowIdsBefore = Set(
@@ -729,22 +722,41 @@ extension HostProtocolServer {
                 .filter { $0.pid == snapshot.pid }
                 .map(\.windowId)
         )
-        if binding.isMenu {
-            if let error = validateApplicationRoot(snapshot) {
-                refuse(error)
-                return
+        let effectGate: EffectGate = { effectElement, requireOriginalDigest in
+            if effectiveBinding.isMenu {
+                if let error = self.validateApplicationRoot(snapshot) {
+                    return error
+                }
+            } else if case .failure(let error) = self.validateRoot(snapshot) {
+                return error
             }
-        } else if case .failure(let error) = validateRoot(snapshot) {
-            refuse(error)
-            return
+            let bindingFailure = requireOriginalDigest
+                ? hostVerifyBinding(effectiveBinding, probe: probe)
+                : hostVerifyBindingTarget(effectiveBinding, probe: probe)
+            if let failure = bindingFailure {
+                return failure
+            }
+            if !effectiveBinding.isMenu,
+               !CFEqual(effectElement, element),
+               (
+                   HostAX.containingWindow(of: effectElement).flatMap { hostWindowId(of: $0) }
+                       != snapshot.windowId
+               ) {
+                return HostDomainError(.windowChanged)
+            }
+            if self.cancellations.isCancelledBeforeDispatch(id: id) {
+                return HostDomainError(.aborted)
+            }
+            self.cancellations.markDispatched(id: id)
+            return nil
         }
-        cancellations.markDispatched(id: id)
         let attempted = performElementAction(
             params.action,
             on: element,
             binding: effectiveBinding,
             window: window,
-            settle: settleMode
+            settle: settleMode,
+            effectGate: effectGate
         )
         var performed =
             attempted.outcome == .unknown
@@ -805,12 +817,15 @@ extension HostProtocolServer {
         let failure: HostDomainError?
     }
 
+    private typealias EffectGate = (AXUIElement, Bool) -> HostDomainError?
+
     private func performElementAction(
         _ action: HostElementAction,
         on element: AXUIElement,
         binding: HostElementBinding,
         window: HostWindowInfo?,
-        settle: HostSettleMode
+        settle: HostSettleMode,
+        effectGate: EffectGate
     ) -> PerformedAction {
         switch action {
         case .click(.left, let count) where binding.dispatchPid != binding.pid:
@@ -825,6 +840,9 @@ extension HostProtocolServer {
                 x: window.bounds.minX + windowPoint.x,
                 y: window.bounds.minY + windowPoint.y
             )
+            if let failure = effectGate(element, true) {
+                return refused(failure)
+            }
             do {
                 try environment.postWebContentClick(
                     at: screenPoint,
@@ -864,7 +882,8 @@ extension HostProtocolServer {
                     on: element,
                     binding: binding,
                     repeatCount: count,
-                    settle: settle
+                    settle: settle,
+                    effectGate: effectGate
                 )
             }
             guard let window else {
@@ -876,7 +895,8 @@ extension HostProtocolServer {
                 binding: binding,
                 window: window,
                 repeatCount: count,
-                settle: settle
+                settle: settle,
+                effectGate: effectGate
             )
 
         case .secondaryAction(let name):
@@ -888,7 +908,8 @@ extension HostProtocolServer {
                     on: element,
                     binding: binding,
                     repeatCount: 1,
-                    settle: .none
+                    settle: .none,
+                    effectGate: effectGate
                 )
             }
             guard let window else {
@@ -900,7 +921,8 @@ extension HostProtocolServer {
                 binding: binding,
                 window: window,
                 repeatCount: 1,
-                settle: .none
+                settle: .none,
+                effectGate: effectGate
             )
 
         case .scroll(let direction, let pages):
@@ -922,7 +944,8 @@ extension HostProtocolServer {
                     on: element,
                     binding: binding,
                     repeatCount: Int(pages),
-                    settle: settle
+                    settle: settle,
+                    effectGate: effectGate
                 )
                 // `path: none` proves the OS refused before one page landed.
                 // Only that side-effect-free arm may try the declared pid-bound
@@ -940,7 +963,8 @@ extension HostProtocolServer {
                     binding: binding,
                     repeatCount: Int(pages),
                     settle: settle,
-                    requireAdvertisedAction: false
+                    requireAdvertisedAction: false,
+                    effectGate: effectGate
                 )
             }
 
@@ -951,6 +975,9 @@ extension HostProtocolServer {
                 x: window.bounds.minX + frame.midX,
                 y: window.bounds.minY + frame.midY
             )
+            if let failure = effectGate(element, true) {
+                return refused(failure)
+            }
             do {
                 try environment.postPointEvent(
                     .scroll(direction: direction, pages: pages),
@@ -1004,11 +1031,15 @@ extension HostProtocolServer {
                         requestedNumber: requestedNumber,
                         direction: direction,
                         opposite: opposite,
-                        on: element
+                        on: element,
+                        effectGate: effectGate
                     )
                 }
             }
 
+            if let failure = effectGate(element, true) {
+                return refused(failure)
+            }
             let result = AXUIElementSetAttributeValue(
                 element,
                 kAXValueAttribute as CFString,
@@ -1051,6 +1082,9 @@ extension HostProtocolServer {
                 return refused(.unsupportedAction)
             }
 
+            if let failure = effectGate(element, true) {
+                return refused(failure)
+            }
             let result = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, axRange)
             guard result == .success else {
                 return failed(.dispatchRefused, path: .none)
@@ -1071,7 +1105,13 @@ extension HostProtocolServer {
             guard let window else {
                 return refused(.windowGone)
             }
-            return performWindowAction(action, on: element, binding: binding, window: window)
+            return performWindowAction(
+                action,
+                on: element,
+                binding: binding,
+                window: window,
+                effectGate: effectGate
+            )
         }
     }
 
@@ -1089,13 +1129,19 @@ extension HostProtocolServer {
         requestedNumber: Double,
         direction: HostElementActionName,
         opposite: HostElementActionName,
-        on element: AXUIElement
+        on element: AXUIElement,
+        effectGate: EffectGate
     ) -> PerformedAction {
-        guard AXUIElementPerformAction(element, direction.rawAXAction as CFString) == .success,
-              let firstReadback = HostAX.stringLikeValue(element, kAXValueAttribute),
+        if let failure = effectGate(element, true) {
+            return refused(failure)
+        }
+        guard environment.performAccessibilityAction(direction, on: element) == .success else {
+            return failed(.dispatchRefused, path: .axAction)
+        }
+        guard let firstReadback = HostAX.stringLikeValue(element, kAXValueAttribute),
               let firstNumber = Double(firstReadback)
         else {
-            return failed(.dispatchRefused, path: .axAction)
+            return unknownOutcome()
         }
 
         let step = firstNumber - currentNumber
@@ -1110,7 +1156,10 @@ extension HostProtocolServer {
             && roundedRemaining <= 99
 
         guard reachesTarget else {
-            let reversed = AXUIElementPerformAction(element, opposite.rawAXAction as CFString)
+            if effectGate(element, false) != nil {
+                return unknownOutcome()
+            }
+            let reversed = environment.performAccessibilityAction(opposite, on: element)
             let restored = HostAX.stringLikeValue(element, kAXValueAttribute)
             if reversed != .success || !hostNumericStringsEqual(restored, previous) {
                 return unknownOutcome()
@@ -1119,7 +1168,10 @@ extension HostProtocolServer {
         }
 
         for _ in 0..<Int(roundedRemaining) {
-            guard AXUIElementPerformAction(element, direction.rawAXAction as CFString) == .success else {
+            if effectGate(element, false) != nil {
+                return unknownOutcome()
+            }
+            guard environment.performAccessibilityAction(direction, on: element) == .success else {
                 return unknownOutcome()
             }
         }
@@ -1158,7 +1210,8 @@ extension HostProtocolServer {
         _ action: HostElementAction,
         on element: AXUIElement,
         binding: HostElementBinding,
-        window: HostWindowInfo
+        window: HostWindowInfo,
+        effectGate: EffectGate
     ) -> PerformedAction {
         // §5.3 — the snapshot's tree is rooted at the window, so `depth == 0` is
         // the window and nothing else is.
@@ -1194,6 +1247,9 @@ extension HostProtocolServer {
         }
 
         let previous = subject.read(element)
+        if let failure = effectGate(element, true) {
+            return refused(failure)
+        }
         guard subject.write(element) == .success else {
             return failed(.dispatchRefused, path: .none)
         }
@@ -1260,7 +1316,9 @@ extension HostProtocolServer {
         binding: HostElementBinding,
         repeatCount: Int,
         settle: HostSettleMode,
-        requireAdvertisedAction: Bool = true
+        requireAdvertisedAction: Bool = true,
+        firstEffectRequiresOriginalDigest: Bool = true,
+        effectGate: EffectGate
     ) -> PerformedAction {
         guard !requireAdvertisedAction || binding.observed.actions.contains(name) else {
             return refused(.elementNotActionable)
@@ -1268,7 +1326,10 @@ extension HostProtocolServer {
 
         var delivered = 0
         for _ in 0..<max(repeatCount, 1) {
-            let result = AXUIElementPerformAction(element, name.rawAXAction as CFString)
+            if let failure = effectGate(element, delivered == 0 && firstEffectRequiresOriginalDigest) {
+                return delivered == 0 ? refused(failure) : unknownOutcome()
+            }
+            let result = environment.performAccessibilityAction(name, on: element)
             switch result {
             case .success:
                 delivered += 1
@@ -1320,8 +1381,12 @@ extension HostProtocolServer {
         binding: HostElementBinding,
         window: HostWindowInfo,
         repeatCount: Int,
-        settle: HostSettleMode
+        settle: HostSettleMode,
+        effectGate: EffectGate
     ) -> PerformedAction {
+        if let failure = effectGate(element, true) {
+            return refused(failure)
+        }
         let context = environment.beginSyntheticTargetFocus(
             pid: binding.pid,
             windowId: window.windowId
@@ -1331,7 +1396,9 @@ extension HostProtocolServer {
             on: element,
             binding: binding,
             repeatCount: repeatCount,
-            settle: settle
+            settle: settle,
+            firstEffectRequiresOriginalDigest: false,
+            effectGate: effectGate
         )
         guard let context else {
             return result
@@ -1348,12 +1415,16 @@ extension HostProtocolServer {
     /// `path: none`; the tier travels anyway, because it is the tier the executor
     /// would have used.
     private func refused(_ code: HostDomainErrorCode) -> PerformedAction {
+        refused(HostDomainError(code))
+    }
+
+    private func refused(_ error: HostDomainError) -> PerformedAction {
         PerformedAction(
             outcome: .refused,
             path: .none,
             tier: .ax,
             verdict: hostEffectNotChecked(),
-            failure: HostDomainError(code)
+            failure: error
         )
     }
 
@@ -1460,16 +1531,15 @@ extension HostProtocolServer {
         currentRegistry().spend(snapshot)
 
         func emitRootReplacement(_ error: HostDomainError) {
-            let verdict = hostEffectNotChecked()
             emit(
                 id: id,
                 payload: HostDispatchResult(
                     toolCallId: toolCallId,
-                    outcome: .unknown,
+                    outcome: outcome,
                     tier: path.tier ?? .ax,
                     path: path,
-                    effect: verdict.effect,
-                    verification: verdict.verification,
+                    effect: fallbackVerdict.effect,
+                    verification: fallbackVerdict.verification,
                     settle: HostSettleReport(
                         waitedMs: 0,
                         quiesced: false,
@@ -1833,6 +1903,7 @@ extension HostProtocolServer {
         }
 
         var focused = environment.focusedElement(pid: snapshot.pid)
+        var acquiredFocus = false
 
         if (params.focusPolicy ?? .require) == .acquire,
            !(focused.map { CFEqual($0, element) } ?? false) {
@@ -1840,6 +1911,11 @@ extension HostProtocolServer {
                 refuse(error)
                 return
             }
+            if let failure = hostVerifyBinding(binding, probe: probe) {
+                refuse(failure)
+                return
+            }
+            cancellations.markDispatched(id: id)
             guard environment.setFocusedElement(element, pid: snapshot.pid) else {
                 // No fallback: an element that refused focus is not an element to
                 // post keys at and hope. §6.4 — the code is the same
@@ -1848,6 +1924,7 @@ extension HostProtocolServer {
                 refuse(HostDomainError(.focusChanged))
                 return
             }
+            acquiredFocus = true
 
             // The write's own success is not proof. Applications accept
             // `kAXFocused` and leave focus where it was, so the only evidence
@@ -1874,7 +1951,10 @@ extension HostProtocolServer {
             refuse(error)
             return
         }
-        if let failure = hostVerifyBinding(binding, probe: probe) {
+        let bindingFailure = acquiredFocus
+            ? hostVerifyBindingTarget(binding, probe: probe)
+            : hostVerifyBinding(binding, probe: probe)
+        if let failure = bindingFailure {
             refuse(failure)
             return
         }

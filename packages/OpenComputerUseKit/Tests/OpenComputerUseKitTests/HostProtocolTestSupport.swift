@@ -358,6 +358,38 @@ final class WindowElementLog {
     }
 }
 
+final class AccessibilityActionLog {
+    private let lock = NSLock()
+    private(set) var performed: [HostElementActionName] = []
+    var result: AXError = .success
+
+    func perform(_ action: HostElementActionName) -> AXError {
+        lock.lock()
+        defer { lock.unlock() }
+        performed.append(action)
+        return result
+    }
+}
+
+/// Keeps the original binding valid until the first Accessibility action lands,
+/// then reports that the retained element moved to another window.
+final class ActionReactiveBindingProbe: HostElementBindingProbe {
+    private let actions: AccessibilityActionLog
+
+    init(actions: AccessibilityActionLog) {
+        self.actions = actions
+    }
+
+    func isReferenceAlive(_ binding: HostElementBinding) -> Bool { true }
+    func processStartTime(pid: pid_t) -> UInt64? { hostTestProcessStartTime }
+    func belongsToBoundTarget(_ binding: HostElementBinding) -> Bool {
+        actions.performed.isEmpty
+    }
+    func currentDigestInput(_ binding: HostElementBinding) -> HostElementDigestInput? {
+        binding.digestInput
+    }
+}
+
 struct FakeEnvironment: HostSystemEnvironment {
     var locked = false
     var accessibilityTrusted = true
@@ -387,6 +419,7 @@ struct FakeEnvironment: HostSystemEnvironment {
     var pointEvents = PointEventLog()
     var keyEvents = KeyEventLog()
     var focusRequests = FocusRequestLog()
+    var accessibilityActions = AccessibilityActionLog()
     var launches = AppLaunchLog()
     var installedBundleIds: [String] = []
     var processStartTimes: [pid_t: UInt64] = [:]
@@ -426,6 +459,10 @@ struct FakeEnvironment: HostSystemEnvironment {
     func focusedElement(pid: pid_t) -> AXUIElement? { focusRequests.currentFocus ?? focused }
     func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool { focusRequests.record(element) }
     func bindingProbe(windowId: CGWindowID, windowBounds: CGRect) -> HostElementBindingProbe { probe }
+    func performAccessibilityAction(
+        _ action: HostElementActionName,
+        on element: AXUIElement
+    ) -> AXError { accessibilityActions.perform(action) }
 
     func postPointEvent(
         _ action: HostPointAction,

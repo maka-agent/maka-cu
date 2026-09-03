@@ -88,6 +88,12 @@ public protocol HostSystemEnvironment {
     /// caller re-reads `focusedElement(pid:)` before posting anything.
     func setFocusedElement(_ element: AXUIElement, pid: pid_t) -> Bool
     func bindingProbe(windowId: CGWindowID, windowBounds: CGRect) -> HostElementBindingProbe
+    /// Performs one Accessibility action after the protocol handler has
+    /// revalidated the exact approved target for this individual effect.
+    func performAccessibilityAction(
+        _ action: HostElementActionName,
+        on element: AXUIElement
+    ) -> AXError
     /// Posts an executor-derived, PID-bound event for an already bound semantic
     /// element action. Model-provided point dispatch never reaches this seam.
     func postPointEvent(
@@ -235,6 +241,13 @@ public struct HostLiveEnvironment: HostSystemEnvironment {
 
     public func bindingProbe(windowId: CGWindowID, windowBounds: CGRect) -> HostElementBindingProbe {
         HostAXBindingProbe(windowId: windowId, windowBounds: windowBounds)
+    }
+
+    public func performAccessibilityAction(
+        _ action: HostElementActionName,
+        on element: AXUIElement
+    ) -> AXError {
+        AXUIElementPerformAction(element, action.rawAXAction as CFString)
     }
 
     public func postPointEvent(

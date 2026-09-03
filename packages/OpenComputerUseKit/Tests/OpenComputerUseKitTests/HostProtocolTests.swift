@@ -202,6 +202,10 @@ final class HostProtocolTests: XCTestCase {
         let failure = hostVerifyBinding(binding, probe: probe)
         XCTAssertEqual(failure?.code, .elementChanged)
         XCTAssertEqual(failure?.detail, .changed([.label]))
+        XCTAssertNil(
+            hostVerifyBindingTarget(binding, probe: probe),
+            "an earlier effect may change E3 without changing its approved target"
+        )
 
         probe = FakeBindingProbe()
         XCTAssertNil(hostVerifyBinding(binding, probe: probe))
