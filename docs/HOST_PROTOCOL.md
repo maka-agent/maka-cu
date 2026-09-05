@@ -325,9 +325,12 @@ collapsing them is how a retry loop becomes indistinguishable from a bug.
 
 Notes:
 
-- A **refused** dispatch does not spend its snapshot. The host may fix the
-  argument and retry against the same frame. The single exception is
-  `outcome_unknown`, which spends it: we cannot prove the action did not land.
+- A refusal before `act` does not spend its snapshot. The host may fix the
+  argument and retry against the same frame. Once `act` has spent the snapshot,
+  even a platform-level refusal reports `error.detail.snapshotSpent: 1` and the
+  host must discard that frame. `outcome_unknown` also spends it: we cannot prove
+  the action did not land. `dispatch.element` reports `snapshotSpent: 0` for a
+  pre-dispatch refusal and `1` after `act`; the value is numeric protocol detail.
 - A **read** does not spend a snapshot. `screen.capture` and `window.list` never
   touch snapshot state.
 - Supersession is scoped to `(pid, windowId)`. Observing window B does not
@@ -1675,8 +1678,13 @@ is a busy screen. Which side changes: the executor, which today emits
 `dispatch_refused` covers both a path that was tried and an action that never
 left the executor, and the declared fields tell them apart without a second code:
 `path: "none"` with `detail.wouldRequirePath` means nothing was attempted, and a
-concrete `path` means it was attempted and the OS said no. That distinction only
-became expressible when refusals started carrying `path` (§1.1).
+concrete `path` means it was attempted and the OS said no. For
+`dispatch.element`, `error.detail.snapshotSpent` is `0` before `act` and `1`
+after `act`, even when the platform refuses. `outcome_unknown` keeps its
+concrete `ax_action` or `ax_attribute` path, uses the existing
+`effect: "unverifiable"`, and places its enum reason in `error.detail.reason`.
+That distinction only became expressible when refusals started carrying `path`
+(§1.1).
 
 ### 6.3 `dispatch.point`
 
@@ -2620,12 +2628,17 @@ Refusals carry the declared fields (§1.1, §6.5):
     refusal missing any of them is rejected by the host as a protocol violation.
     Asserted on a binding refusal (`element_changed`), a policy refusal
     (`window_occluded`) and an attempted-and-rejected one (`dispatch_refused`).
-26. A refusal reports `outcome: "refused"`, `path: "none"`,
-    `effect: "unverifiable"` and `verification.method: "none"`; the host accepts
-    it, maps the error code, and does **not** tear the executor down. The
-    `maka.cu/1` host SIGKILLed on any non-`ok` outcome, so this vector fails
-    against it.
-27. `ok: true` with `outcome: "refused"`, and `ok: false` with `outcome: "ok"`,
+26. A pre-dispatch refusal reports `outcome: "refused"`, `path: "none"`,
+    `effect: "unverifiable"`, `verification.method: "none"`, and
+    `error.detail.snapshotSpent: 0`; an attempted refusal reports its concrete
+    AX path and `snapshotSpent: 1`. The host accepts both, maps the error code,
+    and does **not** tear the executor down. The `maka.cu/1` host SIGKILLed on
+    any non-`ok` outcome, so this vector fails against it.
+27. An attempted unknown element action reports `outcome: "unknown"`, its
+    concrete `ax_action`/`ax_attribute` path, `effect: "unverifiable"`,
+    `verification.observedChange: false`, and `error.detail.snapshotSpent: 1`;
+    it is never rewritten as a refusal or as verified success.
+28. `ok: true` with `outcome: "refused"`, and `ok: false` with `outcome: "ok"`,
     are both protocol violations.
 
 Hashes (§1.3):

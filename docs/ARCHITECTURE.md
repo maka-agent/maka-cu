@@ -1,6 +1,6 @@
 # 架构总览
 
-这个仓库当前已经从模板收敛成一个本地 `computer-use` 项目。macOS 主线是 Swift 实现的 `maka.cu/2` executor：它只对 Maka Electron host 说话，不再自带任何面向模型的 tool 层。Windows 和 Linux 仍是实验性的 Go runtime，暴露原先那组 9 个 Computer Use tools，尚未迁到 host protocol。
+这个仓库当前已经从模板收敛成一个本地 `computer-use` 项目。macOS 主线是 Swift 实现的 `maka.cu/2` executor：它只对 Maka Electron host 说话，不再自带任何面向模型的 tool 层。Windows 已有共享 `maka.cu/2` 的 Rust/direct-COM native executor 骨架和跨机器验证证据，但仍未达到可发布状态；旧 Go runtime 继续作为兼容/实验性实现保留。Linux 仍是实验性的 Go runtime，暴露原先那组 9 个 Computer Use tools，尚未迁到 host protocol。
 
 ## 当前目录结构
 
@@ -9,7 +9,7 @@
 - `apps/OpenComputerUseFixture`
   本地 GUI fixture app，用来承载低风险、可预测的点击/输入/滚动/拖拽验证路径。
 - `apps/OpenComputerUseWindows`
-  实验性 Windows runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP 入口会嵌入 PowerShell UI Automation bridge，构建产物是 `open-computer-use.exe`，并随已有 npm 包的 `dist/windows/<arch>/` bundled artifacts 分发。
+  Windows runtime 目录。现有 Go CLI/MCP 入口仍通过 PowerShell UI Automation bridge 提供旧的 9-tool 兼容面；`native/` 是共享 `maka.cu/2` 的 Rust/direct-COM executor，直接由 Maka host 按 stdio 协议托管。native 产品边界是不主动干扰焦点和输入的原生桌面语义操作，允许目标已经处于前台：当前只声明 `click` / `set_value`，拒绝 keyboard、point、generic launch 及未声明动作，不包含浏览器（浏览器由 Maka Browser Use/OpenCLI 负责）。Rust native executor 仍缺少签名、打包、clean-machine、并发前台用户和混合 DPI 的完整证据，因此暂不标记为 distribution-ready。
 - `apps/OpenComputerUseLinux`
   实验性 Linux runtime。它不依赖 Swift 或 `.app` bundle，Go CLI/MCP 入口会嵌入 Python AT-SPI bridge，构建产物是 `open-computer-use`，并随已有 npm 包的 `dist/linux/<arch>/` bundled artifacts 分发。
 - `packages/OpenComputerUseKit`
@@ -69,7 +69,7 @@
 - host protocol 的 `observe` 不输出任何渲染文本：没有 tab 缩进的树，没有 `list_apps` catalogue。模型看到的每个字都由 Maka runtime 负责，executor 里再放一份就是第二份会漂移的副本。
 - `dispatch.*` 的每个结果都带齐 `outcome` / `tier` / `path` / `effect` 四个闭集字段，外加 `verification`。`path` 与 `tier` 的配对是固定表；host 收到表外的组合应当按协议违规处理，而不是二选一。
 - 单次 left press / `press` / `cancel` 如果在创建或关闭 sheet/window 的同时收到 AX `cannotComplete`，只允许在低于 host request deadline 的 5 秒内连续两次确认目标 PID 的 on-screen window ID 集合已变化后恢复为成功；关闭目标时 post-observation 仍携带 `window_gone`。其他 unknown outcome 不使用这条恢复。
-- element action 前后会读取真实 WindowServer 前台 PID；只有目标 app 自己抢到前台时才请求恢复动作前的精确 PID，用户切到第三个 app 时不干预。activation 与 z-order 传播是异步信号，不改写业务 outcome；是否保持后台由独立 live foreground sentinel 验证。
+- macOS element action 前后会读取真实 WindowServer 前台 PID；只有目标 app 自己抢到前台时才请求恢复动作前的精确 PID，用户切到第三个 app 时不干预。activation 与 z-order 传播是异步信号，不改写业务 outcome；是否保持后台由独立 live foreground sentinel 验证。Windows 的不干扰边界另见下文，不改变此 macOS 行为。
 - 对真实 app 的 `get_app_state` / action tool 入口，当前只保留一层密码管理器 bundle denylist：bundle-id 直传时直接返回 safety denial；名称匹配时默认不解析到这些 app。终端、Chrome / Atlas 和系统组件不再属于内置阻止目标。
 - 普通 app 的 element frame 当前按“窗口左上角为原点”的 window-relative 坐标输出，便于后续把 `element_index` 和截图坐标统一到同一套参考系。
 - `click` / `set_value` 在执行真实动作前后，会额外驱动一层透明 `SoftwareCursorOverlay` window：两者的移动阶段现在共用一条 heading-driven 的官方风格 motion 内核，显式把“当前 cursor 朝向”和“最终 resting pose”一起喂给选路器，优先生成需要时先掉头、再沿车头方向推进的 C 形/单侧大弧轨迹；首次显示时按官方 binary 的 fresh state 从 AppKit 全局 `(0,0)` window origin 生成起点，后续动作继续复用上一帧 visible tip。真正显示出来的 cursor 不再直接等于 path sample，而是经过一层独立的 visual dynamics 状态，把 visible tip、velocity、angle 和 fog/offset 持续推进。`click` 结尾会衔接 click pulse 和更明显但仍然很小的 rotate wobble，`set_value` 则只做 settle / idle，不给 pulse；两者收尾后会在目标点继续保持 idle 状态，等待下一次动作时 tip 保持 anchored、只保留可感知的小角度摆动；只有连续 30 秒没有新动作时才做 cleanup，这样连续 tool call 不会反复从 fresh `(0,0)` 起步；如果宿主在任务 / turn 结束时发出 `turn-ended`，cursor 会立即消失并清掉本轮位置状态。
@@ -111,14 +111,16 @@
 
 ### 6. Windows Runtime
 
-- Windows runtime 位于 `apps/OpenComputerUseWindows`，以 Go 维护 CLI、`call --calls` sequence、MCP JSON-RPC、tool schema 和进程内 snapshot cache。
+- Windows 有两条明确隔离的实现路径：旧 Go runtime 维护 CLI、`call --calls` sequence、MCP JSON-RPC、tool schema 和进程内 snapshot cache；`apps/OpenComputerUseWindows/native` 的 Rust executor 只实现共享 `maka.cu/2` host protocol，不复制面向模型的 tool schema 或第二套生产 supervisor。
+- Rust native executor 使用 Windows UI Automation 的 direct-COM 路径、Win32/WGC 窗口枚举与截图，并在 dispatch 时重新校验 PID、进程启动时间、window generation、RuntimeId 和 snapshot/token 绑定。坐标 dispatch 在协议边界保持 typed refusal；语义动作的执行结果不能仅凭 helper 调用成功宣称 verified，缺少应用层 readback 时保持 `unknown`。
+- Rust native executor 的跨机器验证入口与结果位于 `experiments/maka-cu-windows-rust` 和 `experiments/maka-cu-windows`；正式源代码位于 `apps/OpenComputerUseWindows/native`。当前验证已覆盖 fixture 生命周期/协议、WPF、Chromium、.NET 10 WPF 和隔离临时 profile 的 LibreOffice Writer probe，但旧 comparison harness 仍发送已废弃的私有协议，不能作为 Rust native 的有效回归入口。
 - 构建入口是 `scripts/build-open-computer-use-windows.sh --arch arm64|amd64`，默认输出到 `dist/windows/<arch>/open-computer-use.exe`；npm release package 会把两个 Windows artifact 内置到已有 root/alias packages，Node launcher 按 `process.platform/process.arch` 自动选择。
 - Go runtime 通过 `go:embed` 带上 `runtime.ps1`，执行 tool call 时临时落盘并调用 Windows PowerShell。PowerShell bridge 使用 `System.Windows.Automation` 做 app/window/element discovery、tree rendering、UIA pattern action、ValuePattern set value 和 ScrollPattern scroll；当目标 app 不暴露对应 pattern 时，fallback 到 `PostMessage` / `SendMessage` 形式的 Win32 window message。
 - Windows runtime 默认只连接已经运行的 app，不会在 `get_app_state` 找不到进程时自动 `Start-Process`，也不会默认允许 `SetFocus` secondary action；这两条前台抢占路径分别需要 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_APP_LAUNCH=1` 和 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_FOCUS_ACTIONS=1` 显式打开。`type_text` 默认优先对可写文本控件的 child HWND 发送 `EM_SETSEL` / `EM_REPLACESEL`，不再默认走可能触发前台激活的 UIA `ValuePattern.SetValue` fallback；需要旧行为时必须设置 `OPEN_COMPUTER_USE_WINDOWS_ALLOW_UIA_TEXT_FALLBACK=1`。UIA pattern 和 Win32 message fallback 本身仍是 best-effort：很多控件可以在后台响应，但 Windows 没有一套对所有 GUI toolkit 都等价于 macOS AX 的后台键鼠输入模型。
 - 这 9 个 tool 的协议面与 macOS 主线保持一致：`list_apps`、`get_app_state`、`click`、`perform_secondary_action`、`scroll`、`drag`、`type_text`、`press_key`、`set_value`。其中 element-targeted action 会优先复用上一轮 `get_app_state` 的 runtime id / automation metadata，coordinate action 使用 screenshot/window-relative 坐标。
 - Windows `click_method=accessibility` 映射到 UI Automation pattern，`app_post` 映射到 HWND `PostMessage`；macOS-only 的 `sky_click` 和没有实现的 `global` 都会在 snapshot lookup 前明确返回 unsupported。`auto` 仍保持 UIA 优先、window message fallback 的现有行为。
 - Windows UI Automation 需要运行在已登录用户的桌面 session 里。通过 SSH 作为脱离桌面的后台进程运行时，PowerShell 可以启动并返回 JSON，但系统可能不给它暴露顶层窗口；这种情况下 `list_apps` 会是空，`get_app_state` 可能返回 `appNotFound(...)`。
-- 当前 Windows 侧仍是功能性第一版：没有 visual cursor overlay、没有 installer/onboarding、没有 code signing，也没有独立的 Windows smoke fixture。后续 TODO 记录在 `docs/exec-plans/active/20260422-windows-computer-use-runtime.md`。
+- 旧 Go runtime 仍是功能性第一版；Rust native executor 也不是生产发布物：当前 Windows 打包会受 MSVC Spectre-mitigated library 安装状态影响，尚未完成 code signing、installer/servicing、clean-machine 验证、打包后 Maka conversation E2E 和足够宽的真实应用矩阵。`bundled-tools.json` 的 `distributionReady` 必须保持 `false`，直到这些条件都有证据。
 
 ### 7. Linux Runtime
 
@@ -138,7 +140,8 @@
 - 因为官方 `SkyComputerUseClient` 带有宿主侧 launch constraints，普通 stdio MCP client 在本机上可能被系统直接杀掉；如果要探测官方 bundled `computer-use`，`scripts/computer-use-cli` 的 app-server 模式现在只适合做工具清单和协议面观察。官方 `1.0.755` 的真实 tool call 还会经过 service-side sender authorization / active IPC client 追踪，外部 raw helper 即使走已签名 Codex binary，也可能返回 `Sender process is not authenticated`；需要真实使用官方工具时应走正常 Codex agent/tool 调用链，本仓库这条线现在只对 Maka host 说 `maka.cu/2`，不再提供可直连的 MCP server。
 - 当前权限引导已经具备可运行 app、深链、拖拽辅助，以及一版更接近官方的 accessory panel 入场动画和返回 affordance；点击链路也已经补上独立 visual cursor、官方 asset fallback 和相对目标 window 的排序逻辑，并且在 overlay 可见期间会持续重申“排在目标 window 之上”，避免用户手动激活目标 app 后 cursor 被目标窗口重新盖住；但整体还没有完全复刻官方那套嵌入式 choreography / host 集成 / session approval 体验。
 - host protocol 的截图一律以文件路径返回，写在握手声明的 `imageDir` 里，生命周期与 snapshot 绑定；line-framed 通道上内联 base64 是 4/3 膨胀，而且一条 8 MB 的行会把其它待回的响应全部堵住。调试命令仍走 `ScreenCaptureKit` 捕获目标窗口，不再把普通 app 截图落盘到仓库或临时目录；编码前会按最大尺寸和目标字节数自适应缩小，避免复杂页面的大 PNG 触发 host 侧 MCP result 降级，同时 coordinate tools 继续按实际返回的 screenshot pixel 尺寸映射坐标；单次 ScreenCaptureKit capture 会设置超时，超时后省略 image block 而不是卡住整个 `get_app_state`。
-- host protocol 的会话状态是进程内内存态：每个 session 持有自己的 snapshot 集合、element token 字典和保留的 `AXUIElement` 引用；`session.end` 会一次性释放 snapshot、删除本会话写出的图片，并清掉 executor 画的 cursor，同时把释放计数报回去，好让这类回归有断言可写。
+- host protocol 的会话状态是进程内内存态：每个 session 持有自己的 snapshot 集合、element token 字典和保留的 `AXUIElement` 引用；Windows native executor 同样按 120 秒 TTL、同窗 supersession 和每 session 八张 live snapshot 维护状态，并把图片账本绑定到 snapshot 或 session。`session.end` 会一次性释放 snapshot、删除本会话写出的图片，并把释放计数报回去，好让这类回归有断言可写。
+- Windows native executor 在建立任何 UIA/WGC worker 前启用 Per-Monitor-V2 DPI awareness，并分别报告 window/monitor 的实际 scale factor。每次语义 mutation 前后读取前台 HWND/PID、物理鼠标位置和 clipboard sequence；目标已经处于前台时仍允许 UIA semantic pattern，动作期间这些状态发生变化时不得报告成功。实现中不存在 `SetForegroundWindow`、`SetFocus`、全局 `SendInput` 或 generic process launch 路径。
 - 本仓库旧 MCP/CLI 产品面仍有历史坐标 API；它和 Maka 的 `maka.cu/2` host protocol 是不同边界。Windows、macOS 和后续平台接入 Maka 时必须共享 semantic-only host contract，不能从旧 MCP/CLI schema 派生第二套 model action space 或 fallback ladder。
 
 ## 主要验证路径

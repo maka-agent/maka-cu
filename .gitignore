@@ -5,6 +5,8 @@
 dist/
 .gemini/
 artifacts/codex-dumps/
+artifacts/windows-cu/
+apps/OpenComputerUseWindows/native/target/
 research/
 __pycache__/
 *.pyc
